@@ -1,5 +1,5 @@
 import numpy as np
-from shallow import GodunovSolver, CabaretSolver
+from solvers import GodunovSolver, CabaretSolver
 
 
 def compute(h, hu, solver, dx, t_end):
@@ -15,6 +15,7 @@ def compute(h, hu, solver, dx, t_end):
         h, hu = solver.step(h, hu, dx, dt)
         t += dt
 
+    # print(t)
     # print(h)
     return h, hu
 
@@ -70,22 +71,21 @@ def initial_conditions(nx, h_l, u_l, h_r, u_r):
     hu = h * u
     return h, hu
 
-def run_simulation(a, nx, h_l, u_l, h_r, u_r, t_end):
-    L = 2 * a
+def run_simulation(L, nx, h_l, u_l, h_r, u_r, t_end):
     dx = L / nx
-    h0, hu0 = initial_conditions(nx + 1, h_l, u_l, h_r, u_r)
+    h0, hu0 = initial_conditions(nx, h_l, u_l, h_r, u_r)
 
     # print(h0, hu0)
 
-    # new_h, new_hu = insert_intermediate_points(h0, hu0)
+    new_h, new_hu = new_grid(h0, hu0)
     # # print(new_h, new_hu)
-    # solver = CabaretSolver(solver_func='classic')
-    # h_final, hu_final = compute(new_h.copy(), new_hu.copy(), solver, dx, t_end)
-    # return h_final[::2], hu_final[::2]
-
-    solver = GodunovSolver(solver_func='newton')
-    h_final, hu_final = compute(h0.copy(), hu0.copy(), solver, dx, t_end)
+    solver = CabaretSolver(solver_func='classic')
+    h_final, hu_final = compute(new_h.copy(), new_hu.copy(), solver, dx, t_end)
     return h_final, hu_final
+
+    # solver = GodunovSolver(solver_func='newton')
+    # h_final, hu_final = compute(h0.copy(), hu0.copy(), solver, dx, t_end)
+    # return h_final, hu_final
 
 def error_norm(a, b, dx):
     # return np.max(np.abs(a - b))
