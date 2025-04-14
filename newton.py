@@ -1,142 +1,103 @@
 import numpy as np
+import matplotlib.pyplot as plt
+from shallow import RiemannSolver, CabaretSolver, GodunovSolver
+from solver import run_simulation, initial_conditions, error_norm
 
-def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000):
-
-    uL = huL / hL if hL > 0 else 0
-    uR = huR / hR if hR > 0 else 0
-
-    h_k = np.array([hL, hR])
-    u_k = np.array([uL, uR])
-    c_k = np.sqrt(g * h_k)
-
-    c = 0.25 * (u_k[0] - u_k[1]) + 0.5 * c_k.sum()
-
-    grad = 1
-    eps = 1e-15
-
-    phi_k = np.array([0, 0])
-    dphi_k = np.array([0, 0])
-
-
-    k = 0
-    while abs(grad) > tol and k < max_iter:
-        k += 1
-        s_k = c / c_k
-        phi_k = np.where(s_k >= 1, ((c - c_k) * (s_k + 1) * np.sqrt(1 + s_k ** -2) / np.sqrt(2)), 2 * (c - c_k))
-        dphi_k = np.where(s_k > 1, ((2 * s_k ** 2 + 1 + s_k ** -2) / (np.sqrt(2) * s_k * np.sqrt(1 + s_k ** -2))), 2)
-
-        grad = (phi_k.sum() - (u_k[0] - u_k[1])) / (dphi_k.sum())
-        c -= grad
-        # print(f'k = {k}, F = {phi_k}, grad = {grad}')
-
-    # print(k)
-
-    h_star = c ** 2 / g
-    u_star = 0.5 * (u_k.sum() + phi_k[1] - phi_k[0])
-    # print(f'h = {h_star}, u = {u_star}')
-
-    def compute_wave(u, h):
-        if u > 0:               # Contact to the right of the cell point
-            if c > c_k[0]:      # Shock wave
-                D_L = uL - c * np.sqrt(1 + (c / c_k[0]) ** 2) / np.sqrt(2)
-                if D_L < 0:
-                    H = h
-                    U = u
-                else:
-                    H = hL
-                    U = uL
-                # print("Shock wave to the left: ", hL, uL, hR, uR, H, U)
-            else:               # Rarefaction
-                c_starL = c_k[0] + (uL - u) / 2
-                D_starL = u - c_starL
-                D_L = u - c_k[0]
-
-                if D_starL < 0:
-                    H = h
-                    U = u
-                elif D_L > 0:
-                    H = hL
-                    U = uL
-                else:
-                    c_star = (2 * c_k[0] + uL) / 3
-                    U = c_star
-                    H = c_star ** 2 / g
-                # print("Rarefaction to the left: ", hL, uL, hR, uR, H, U)
-        else:                   # Contact to the left of the cell point
-            if c > c_k[1]:      # Shock wave
-                D_R = uR + c * np.sqrt(1 + (c / c_k[1]) ** 2) / np.sqrt(2)
-                if D_R > 0:
-                    H = h
-                    U = u
-                else:
-                    H = hR
-                    U = uR
-                # print("Shock wave to the right: ", hL, uL, hR, uR, H, U)
-            else:               # Rarefaction
-                c_starR = c_k[1] - (uR - u) / 2
-                D_starR = u + c_starR
-                D_R = u + c_k[1]
-
-                if D_starR > 0:
-                    H = h
-                    U = u
-                elif D_R < 0:
-                    H = hR
-                    U = uR
-                else:
-                    c_star = (2 * c_k[1] - uR) / 3
-                    U = -c_star
-                    H = c_star ** 2 / g
-                # print("Rarefaction to the right: ", hL, uL, hR, uR, H, U, D_starR, D_R)
-        return H, U
-
-        # if u + c < 0:  # Hydraulic jump (shock)
-        #     return {
-        #         "D": u - c * np.sqrt((1 + (c / c_star) ** 2) / 2),
-        #         "H": h,
-        #         "U": u
-        #     }
-        # elif u < c:  # Rarefaction wave
-        #     c_star_local = c + (u - u_star) / 2
-        #     return {
-        #         "D": u - c_star_local,
-        #         "H": c_star_local ** 2 / g,
-        #         "U": u_star
-        #     }
-        # else:  # Contact discontinuity
-        #     return {
-        #         "D": u - c,
-        #         "H": h,
-        #         "U": u
-        #     }
-
-    H, U = compute_wave(u_star, h_star)
-
-    # Apply wave type calculations for left and right sides
-    # wave_L = compute_wave(h_k[0], u_k[0], c_k[0], c)
-    # wave_R = compute_wave(h_k[1], u_k[1], c_k[1], c)
-
-    h_star = H
-    u_star = U
-
-    # h_star = 0.5 * (wave_R['H'] + wave_L['H'])
-    # h_star = 0.5 * (wave_R['H'] + wave_L['H'])
-
-    F_h = h_star * u_star
-    F_hu = h_star * u_star ** 2 + 0.5 * g * h_star ** 2
+def plot():
+    sovler = RiemannSolver()
+    n = 100
+    L = 10
+    x = np.linspace(-L, L, n + 1, endpoint=True)
+    t = 0.5
+    h_l = 1
+    h_r = 1
+    u_l = -0.1
+    u_r = 0.1
+    res = sovler.solve(x, t, h_l, u_l, h_r, u_r)
+    h_vals, u_vals = res['vals']
+    D_L, D_starL, D_R, D_starR, left_star_boundary, right_star_boundary = res['bounds']
 
 
-    return {
-        "flux": np.array([F_h, F_hu, h_star, u_star]),
-        "star": np.array([h_star, u_star]),
-        "data": np.array([k]),
-        # "h_star": h_star,
-        # "u_star": u_star,
-        # "wave_left": wave_L,
-        # "wave_right": wave_R
-    }
+    fig = plt.figure(figsize=(10, 8))
+    axes = fig.subplots(nrows=2, ncols=1)
 
-# riemann_solver_newton(2, 0, 1, 0)
+    # Plot water depth
+    # plt.subplot(2, 1, 1)
+    axes[0].plot(x, h_vals, 'b-', linewidth=2, label='Water depth, h(x,t)')
+
+    # Mark the wave boundaries with vertical dashed lines.
+    # axes[0].axvline(D_L * t, color='k', linestyle='--', label='Left wave head')
+    # if D_starL is not None:
+    #     axes[0].axvline(left_star_boundary * t, color='c', linestyle='--', label='Left rarefaction tail')
+    # axes[0].axvline(right_star_boundary * t, color='m', linestyle='--', label='Star region right boundary')
+    # if D_starR is not None:
+    #     axes[0].axvline(D_R * t, color='g', linestyle='--', label='Right rarefaction head')
+    # else:
+    #     axes[0].axvline(D_R * t, color='k', linestyle='--', label='Right shock speed')
+    # axes[0].title(f'Shallow Water Riemann Problem Profiles at t = {t}')
+    # axes[0].ylabel('h(x,t)')
 
 
-# print((riemann_solver_newton(0.16616937452286534,1.397453350187618,0.9035557488421739,7.817597305365126)))
+    # Plot velocity profile
+    # plt.subplot(2, 1, 2)
+    axes[1].plot(x, u_vals, 'r-', linewidth=2, label='Velocity, u(x,t)')
+
+    # axes[1].axvline(D_L * t, color='k', linestyle='--', label='Left wave head')
+    # if D_starL is not None:
+    #     axes[1].axvline(left_star_boundary * t, color='c', linestyle='--', label='Left rarefaction tail')
+    # axes[1].axvline(right_star_boundary * t, color='m', linestyle='--', label='Star region right boundary')
+    # if D_starR is not None:
+    #     axes[1].axvline(D_R * t, color='g', linestyle='--', label='Right rarefaction head')
+    # else:
+    #     axes[1].axvline(D_R * t, color='k', linestyle='--', label='Right shock speed')
+    # axes[1].xlabel('x')
+    # axes[1].ylabel('u(x,t)')
+
+
+    resolutions = [n, 2 * n]
+    results = []
+
+    # Run simulation on different grid resolutions.
+    for nx in resolutions:
+        h_result = run_simulation(L, nx, h_l, u_l, h_r, u_r, t_end=t)
+        results.append(h_result)
+        # print(results)
+        axes[0].plot(np.linspace(-L, L, nx + 1, endpoint=True), h_result[0], label=str(nx), linestyle='-.',)
+        axes[1].plot(np.linspace(-L, L, nx + 1, endpoint=True), h_result[1], label=str(nx), linestyle='-.',)
+
+    # For the medium grid: pick points with step 2 to get n values.
+    # h_med_common = results[1][::2]
+    error1 = error_norm(results[0][0], h_vals, L / resolutions[0])
+    # print(results[0][:20], results[1][:20], results[2][:20], h_med_common[:20])
+
+    # axes[0][1].plot(np.linspace(-L, L, resolutions[0] + 1, endpoint=True), np.abs(results[0] - h_med_common),
+    #                 label=str(resolutions[0]), linestyle='--')
+
+    # h_fine_common = results[1][::2]
+    error2 = error_norm(results[1][0][::2], h_vals, L / resolutions[0])
+
+    # axes[0][1].plot(np.linspace(-L, L, resolutions[1] + 1, endpoint=True), np.abs(results[1] - h_fine_common),
+    #                 label=str(resolutions[1]), linestyle='--')
+
+    # plt.show()
+
+    # Estimate order of convergence.
+    order = np.log2(error1 / error2)
+
+
+    print("Error between n and 2n grids:", error1)
+    # print("Error between 2n and 4n grids:", error2)
+    print("Estimated order of convergence:", order)
+
+
+    axes[0].legend()
+    axes[0].grid(True)
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == '__main__':
+    plot()
