@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 
+
 def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000):
 
     uL = huL / hL if hL > 0 else 0
@@ -131,7 +132,6 @@ def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000)
     H, U = res[:2]
     D_L, D_starL, D_R, D_starR = res[2:]
 
-    # Apply wave type calculations for left and right sides
     # wave_L = compute_wave(h_k[0], u_k[0], c_k[0], c)
     # wave_R = compute_wave(h_k[1], u_k[1], c_k[1], c)
 
@@ -158,12 +158,10 @@ def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000)
     }
 
 def flux(h, hu, g=9.81):
-    """Compute the physical flux for shallow water equations."""
     u = np.where(h > 0, hu / h, 0)  # Avoid division by zero
     return np.array([hu, hu * u + 0.5 * g * h ** 2])
 
-def riemann_solver(hL, huL, hR, huR, g=9.81):
-    """Solve Riemann problem for shallow water equations."""
+def riemann_solver_approx(hL, huL, hR, huR, g=9.81):
     uL = huL / hL if hL > 0 else 0
     uR = huR / hR if hR > 0 else 0
 
@@ -194,64 +192,9 @@ def riemann_solver(hL, huL, hR, huR, g=9.81):
         part = np.append(part, [hRoe, uRoe])
         return part
 
-def riemann_solver_iter(hL, huL, hR, huR, g=9.81, tol=1e-6, max_iter=1000):
-    """
-    Exact Riemann solver for the shallow water equations using Newton's method.
-
-    Parameters:
-    - hL: float, water depth on the left
-    - huL: float, momentum on the left
-    - hR: float, water depth on the right
-    - huR: float, momentum on the right
-    - g: float, gravitational acceleration
-    - tol: float, tolerance for Newton's method
-    - max_iter: int, maximum number of iterations for Newton's method
-
-    Returns:
-    - Flux at the interface as a numpy array [F_h, F_hu]
-    """
-    # Compute velocities on the left and right
-    uL = huL / hL if hL > 0 else 0
-    uR = huR / hR if hR > 0 else 0
-
-    # Function to solve for h_star
-    def f(h_star):
-        """Nonlinear equation for h_star."""
-        termL = (h_star - hL) * (np.sqrt(0.5 * g * (h_star + hL)))
-        termR = (h_star - hR) * (np.sqrt(0.5 * g * (h_star + hR)))
-        return termL + termR + (uR - uL)
-
-    def df(h_star):
-        """Derivative of f(h_star)."""
-        termL = np.sqrt(0.5 * g * (h_star + hL)) + 0.5 * g * (h_star - hL) / np.sqrt(0.5 * g * (h_star + hL))
-        termR = np.sqrt(0.5 * g * (h_star + hR)) + 0.5 * g * (h_star - hR) / np.sqrt(0.5 * g * (h_star + hR))
-        return termL + termR
-
-    # Initial guess for h_star (arithmetic mean of hL and hR)
-    h_star = 0.5 * (hL + hR)
-
-    # Newton's method to find h_star
-    for _ in range(max_iter):
-        f_val = f(h_star)
-        df_val = df(h_star)
-        if abs(f_val) < tol:  # Convergence check
-            break
-        h_star -= f_val / df_val
-    else:
-        raise RuntimeError("Newton's method failed to converge for h_star")
-
-    # Compute the intermediate velocity
-    u_star = 0.5 * (uL + uR) - 0.5 * (np.sqrt(g / h_star) * (hR - hL))
-
-    # Compute fluxes based on the solution
-    F_h = h_star * u_star
-    F_hu = h_star * u_star ** 2 + 0.5 * g * h_star ** 2
-
-    return np.array([F_h, F_hu, h_star, u_star])
-
-def riemann_solver_nn(hL, huL, hR, huR, model, g=9.81):
-    inputs = torch.tensor([hL, huL, hR, huR, np.sqrt(g * hL), np.sqrt(g * hR)],
-                          dtype=torch.float32)
+def riemann_solver_nn(hL, huL, hR, huR, model, g=9.8066):
+    # inputs = torch.tensor([hL, huL, hR, huR, np.sqrt(g * hL), np.sqrt(g * hR)], dtype=torch.float32)
+    inputs = torch.tensor([hL, huL, hR, huR], dtype=torch.float32)
     h_star, u_star = model(inputs.to('cuda')).cpu().detach().numpy()
 
     F_h = h_star * u_star
@@ -266,7 +209,6 @@ class GodunovSolver:
     def __init__(self, solver_func='classic', model=None, g=9.81):
         self.g = g
         self.model = model
-        # Acceptable solver options: 'default', 'iter', 'newton', 'nn'
         self.solver_func = solver_func
         print(self.solver_func)
 
@@ -279,9 +221,7 @@ class GodunovSolver:
 
         for i in range(n - 1):
             if self.solver_func == 'classic':
-                flux_i = riemann_solver(h[i], hu[i], h[i + 1], hu[i + 1])
-            elif self.solver_func == 'iter':
-                flux_i = riemann_solver_iter(h[i], hu[i], h[i + 1], hu[i + 1], self.g)
+                flux_i = riemann_solver_approx(h[i], hu[i], h[i + 1], hu[i + 1])
             elif self.solver_func == 'newton':
                 flux_i = riemann_solver_newton(h[i], hu[i], h[i + 1], hu[i + 1])['flux']
             elif self.solver_func == 'nn':
@@ -311,64 +251,98 @@ class CabaretSolver:
         self.model = model
         # Acceptable solver options: 'default', 'iter', 'newton', 'nn'
         self.solver_func = solver_func
-        print(self.solver_func)
+        print("Cabaret solver: ", self.solver_func)
+        # print(self.model)
         self.f = open('train.txt', 'w+')
 
     def step(self, h, hu, dx, dt):
         u = hu / h
 
-        # h_left = h[0]
-        # h_right = h[-1]
-        # hu_left = hu[0]
-        # hu_right = hu[-1]
-        # print('1', h_left, h_right, h_left, h_right)
+        # Инварианты на n-м слое по времени
+        neg_char = u - 2 * np.sqrt(self.g * h)
+        pos_char = u + 2 * np.sqrt(self.g * h)
 
         # Step 1
         h[1::2] -= dt / (2 * dx) * (hu[2::2] - hu[:-1:2])
-        hu[1::2] -= dt / (2 * dx) * ((h[2::2] * (u[2::2]) ** 2 + 0.5 * self.g * h[2::2] ** 2) - (
-        h[:-1:2] * (u[:-1:2]) ** 2 + 0.5 * self.g * h[:-1:2] ** 2))
+        hu[1::2] -= dt / (2 * dx) * ((h[2::2] * (u[2::2]) ** 2 + 0.5 * self.g * h[2::2] ** 2) - (h[:-1:2] * (u[:-1:2]) ** 2 + 0.5 * self.g * h[:-1:2] ** 2))
 
         # print(h)
 
-        if self.solver_func == 'classic':
-            # Step 2
-
+        # Step 2
+        if self.solver_func != 'generic_nn':
             u = hu / h
-            for i in range(h.shape[0]):
-                if u[i] > (self.g * h[i]) ** 0.5:
-                    self.f.write(f"{h[i]}, {hu[i]}, {dx}, {dt}\n")
 
-            # Calculate characteristics
-            left_char = u - 2 * np.sqrt(self.g * h)
-            right_char = u + 2 * np.sqrt(self.g * h)
+            # В четных точках старые инварианты (n слой), в консервативных точках на полуцелом шаге по времени (n + 1/2)
+            neg_char_new = u - 2 * np.sqrt(self.g * h)
+            pos_char_new = u + 2 * np.sqrt(self.g * h)
 
-            left_char_new = np.zeros_like(left_char)
-            right_char_new = np.zeros_like(right_char)
+            for i in range(2, neg_char_new.shape[0] - 1, 2):
+                lambda_left_neg = u[i - 1] - (self.g * h[i - 1]) ** 0.5
+                lambda_left_pos = u[i - 1] + (self.g * h[i - 1]) ** 0.5
+                lambda_right_neg = u[i + 1] - (self.g * h[i + 1]) ** 0.5
+                lambda_right_pos = u[i + 1] + (self.g * h[i + 1]) ** 0.5
 
-            left_char_new[:-1:2] = 2 * left_char[1::2] - left_char[2::2]
-            right_char_new[2::2] = 2 * right_char[1::2] - right_char[:-1:2]
+                # Нейр
+                if self.solver_func == 'selective_nn' and ((np.sign(lambda_left_neg) != np.sign(lambda_right_neg)) or (np.sign(lambda_left_pos) != np.sign(lambda_right_pos))):
+                    # print('test')
+                    fluxx = riemann_solver_nn(h[i - 1], hu[i - 1], h[i + 1], hu[i + 1], self.model, self.g)
+                    _, _, hh, uu = fluxx
+                    neg_char_new[i] = uu - 2 * (self.g * hh) ** 0.5
+                    pos_char_new[i] = uu + 2 * (self.g * hh) ** 0.5
 
-            # print(left_char_new.shape)
-            # Normalize characteristics
-            for i in range(2, left_char_new.shape[0] - 1, 2):
-                if left_char_new[i] < min(left_char[i + 2], left_char[i + 1], left_char[i]):
-                    # print('left less then min', i, left_char[i + 2], left_char[i + 1], left_char[i], left_char_new[i])
-                    left_char_new[i] = min(left_char[i + 2], left_char[i + 1], left_char[i])
-                elif left_char_new[i] > max(left_char[i + 2], left_char[i + 1], left_char[i]):
-                    # print('left greater then max', i, left_char[i + 2], left_char[i + 1], left_char[i], left_char_new[i])
-                    left_char_new[i] = max(left_char[i + 2], left_char[i + 1], left_char[i])
+                # Кабаре с обработкой звуковых точек, не дописан, не используется
+                elif self.solver_func == 'classic_improved' and (np.sign(lambda_left_neg) != np.sign(lambda_right_neg) or np.sign(lambda_left_pos) != np.sign(lambda_right_pos)):
+                    c_middle = ((self.g * h[i - 1]) ** 0.5 + (self.g * h[i + 1]) ** 0.5) / 2
+                    u_middle = (u[i - 1] + u[i + 1]) / 2
+                    lambda_middle_neg = u_middle - c_middle
+                    lambda_middle_pos = u_middle + c_middle
+                    neg_char_middle = u_middle - 2 * c_middle
+                    pos_char_middle = u_middle + 2 * c_middle
 
-                if right_char_new[i] < min(right_char[i - 2], right_char[i - 1], right_char[i]):
-                    # print('right less then min', i, right_char[i - 2], right_char[i - 1], right_char[i], right_char_new[i])
-                    right_char_new[i] = min(right_char[i - 2], right_char[i - 1], right_char[i])
-                if right_char_new[i] > max(right_char[i - 2], right_char[i - 1], right_char[i]):
-                    # print('right greater then max', i, right_char[i - 2], right_char[i - 1], right_char[i], right_char_new[i])
-                    right_char_new[i] = max(right_char[i - 2], right_char[i - 1], right_char[i])
+                    if np.sign(lambda_left_neg) != np.sign(lambda_right_neg):
+                        neg_char_new[i] = 2 * neg_char_middle - neg_char[i]
+                    else:
+                        neg_char_new[i] = 2 * neg_char[i + 1] - neg_char[i + 2]
+
+                    if np.sign(lambda_left_pos) != np.sign(lambda_right_pos):
+                        pos_char_new[i] = 2 * pos_char_middle - pos_char[i]
+                    else:
+                        pos_char_new[i] = 2 * pos_char[i - 1] - pos_char[i - 2]
+
+                # Обычная линейная экстраполяция
+                else:
+                    neg_char_new[i] = 2 * neg_char_new[i + 1] - neg_char[i + 2]
+                    pos_char_new[i] = 2 * pos_char_new[i - 1] - pos_char[i - 2]
+
+
+            # Нелинейная коррекция инвариантов в потоковых точках
+            for i in range(2, neg_char_new.shape[0] - 1, 2):
+                # lambda_pos = u[i + 1] + (self.g * h[i + 1]) ** 0.5
+                # lambda_neg = u[i + 1] - (self.g * h[i + 1]) ** 0.5
+
+                if pos_char_new[i] < min(pos_char[i - 2], pos_char[i - 1], pos_char[i]):
+                    # print('right less then min', i, pos_char[i - 2], pos_char[i - 1], pos_char[i], pos_char_new[i])
+                    pos_char_new[i] = min(pos_char[i - 2], pos_char[i - 1], pos_char[i])    # Все значения берем с n-го слоя
+                if pos_char_new[i] > max(pos_char[i - 2], pos_char[i - 1], pos_char[i]):
+                    # print('right greater then max', i, pos_char[i - 2], pos_char[i - 1], pos_char[i], pos_char_new[i])
+                    pos_char_new[i] = max(pos_char[i - 2], pos_char[i - 1], pos_char[i])
+
+                if neg_char_new[i] < min(neg_char[i + 2], neg_char[i + 1], neg_char[i]):
+                    # print('left less then min', i, neg_char[i + 2], neg_char[i + 1], neg_char[i], neg_char_new[i])
+                    neg_char_new[i] = min(neg_char[i + 2], neg_char[i + 1], neg_char[i])
+                elif neg_char_new[i] > max(neg_char[i + 2], neg_char[i + 1], neg_char[i]):
+                    # print('left greater then max', i, neg_char[i + 2], neg_char[i + 1], neg_char[i], neg_char_new[i])
+                    neg_char_new[i] = max(neg_char[i + 2], neg_char[i + 1], neg_char[i])
 
             # Calculate values
-            u[2:-1:2] = (left_char_new[2:-1:2] + right_char_new[2:-1:2]) / 2
-            h[2:-1:2] = ((right_char_new[2:-1:2] - left_char_new[2:-1:2]) / 4) ** 2 / self.g
-            hu[2:-1:2] = h[2:-1:2] * u[2:-1:2]
+            # u[2:-1:2] = (neg_char_new[2:-1:2] + pos_char_new[2:-1:2]) / 2
+            # h[2:-1:2] = ((pos_char_new[2:-1:2] - neg_char_new[2:-1:2]) / 4) ** 2 / self.g
+            # hu[2:-1:2] = h[2:-1:2] * u[2:-1:2]
+
+            for i in range(2, len(u) - 1, 2):
+                u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
+                h[i] = ((pos_char_new[i] - neg_char_new[i]) / 4) ** 2 / self.g
+                hu[i] = h[i] * u[i]
 
         else:
             for i in range(1, h.shape[0] - 3, 2):
@@ -378,21 +352,9 @@ class CabaretSolver:
                 hu[i + 1] = hh * uu
 
 
-        # print(min(h))
-
-        # u = hu / h
-
-        # h[0] = h_left
-        # h[-1] = h_right
-        # hu[0] = hu_left
-        # hu[-1] = hu_right
-        # print('3', h_left, h_right, h_left, h_right)
-
         # Step 3
         h[1::2] -= dt / (2 * dx) * (hu[2::2] - hu[:-1:2])
-        hu[1::2] -= dt / (2 * dx) * ((h[2::2] * (u[2::2]) ** 2 + 0.5 * self.g * h[2::2] ** 2) - (h[:-1:2] * (u[:-2:2]) ** 2 + 0.5 * self.g * h[:-2:2] ** 2))
-
-        # print(min(h))
+        hu[1::2] -= dt / (2 * dx) * ((h[2::2] * (u[2::2]) ** 2 + 0.5 * self.g * h[2::2] ** 2) - (h[:-1:2] * (u[:-1:2]) ** 2 + 0.5 * self.g * h[:-1:2] ** 2))
 
         return h, hu
 
@@ -402,7 +364,7 @@ class RiemannSolver:
         self.g = g
         self.model = model
         self.solver_func = solver_func
-        print(self.solver_func)
+        # print(self.solver_func)
 
     def solve(self, x, t, h_l, u_l, h_r, u_r):
         res = riemann_solver_newton(h_l, h_l * u_l, h_r, h_r * u_r)
@@ -428,11 +390,8 @@ class RiemannSolver:
             D_starR = u_star + np.sqrt(self.g * h_star)
 
         left_star_boundary = D_starL if D_starL is not None else D_L
-        # Similarly, for the right wave:
         right_star_boundary = D_starR if D_starR is not None else D_R
 
-        # Create spatial grid and similarity variable xi = x/t
-        # x = np.linspace(-a, a, 500)
         xi = x / t
 
         def h_profile(xi):
@@ -442,7 +401,6 @@ class RiemannSolver:
             cond1 = xi < D_L
 
             # Region II: Left rarefaction fan (if applicable)
-            # Only defined if D_starL is not None.
             cond2 = (D_starL is not None) & (xi >= D_L) & (xi < left_star_boundary)
 
             # Region III: Star region (between left and right star boundaries)
@@ -458,20 +416,18 @@ class RiemannSolver:
 
             if D_starL is not None:
                 # For left rarefaction fan, use similarity solution:
-                # h = [ (u_l + 2*sqrt(g*h_l) - xi)/(3*sqrt(g)) ]^2
                 h[cond2] = ((u_l + 2 * np.sqrt(self.g * h_l) - xi[cond2]) / (3 * np.sqrt(self.g))) ** 2
             else:
                 # If no rarefaction, there is no fan region (shock)
-                h[cond2] = h_l  # Not really used.
+                h[cond2] = h_l
 
             h[cond3] = h_star
 
             if D_starR is not None:
                 # For right rarefaction fan, use similarity solution:
-                # h = [ (xi - u_r + 2*sqrt(g*h_r))/(3*sqrt(g)) ]^2
                 h[cond4] = ((xi[cond4] - u_r + 2 * np.sqrt(self.g * h_r)) / (3 * np.sqrt(self.g))) ** 2
             else:
-                h[cond4] = h_r  # Not really used.
+                h[cond4] = h_r
 
             h[cond5] = h_r
 
@@ -499,19 +455,17 @@ class RiemannSolver:
 
             if D_starL is not None:
                 # For left rarefaction fan:
-                # u = u_l + (2/3)*(xi - (u_l - sqrt(g*h_l)))
                 u[cond2] = u_l + (2 / 3) * (xi[cond2] - (u_l - np.sqrt(self.g * h_l)))
             else:
-                u[cond2] = u_l  # Not really used.
+                u[cond2] = u_l
 
             u[cond3] = u_star
 
             if D_starR is not None:
                 # For right rarefaction fan:
-                # u = u_r - (2/3)*((u_r + sqrt(g*h_r)) - xi)
                 u[cond4] = u_r - (2 / 3) * ((u_r + np.sqrt(self.g * h_r)) - xi[cond4])
             else:
-                u[cond4] = u_r  # Not really used.
+                u[cond4] = u_r
 
             u[cond5] = u_r
 
