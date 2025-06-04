@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from solvers import CabaretSolver, GodunovSolver, CabaretSolverNN, CabaretSolverPlusPlus, RiemannSolver
+from solvers import CabaretSolver, GodunovSolver, CabaretSolverNN, CabaretSolverPlus, RiemannSolver
 from models import load_nn
 
 
@@ -267,7 +267,7 @@ if __name__ == '__main__':
     # sim2.plot_animation()
 
 
-    config['solver'] = CabaretSolverPlusPlus(model=None)
+    config['solver'] = CabaretSolverPlus(model=None)
     # config['t_end'] = 0.2
     sim3 = Simulation(config)
     sim3.run()
