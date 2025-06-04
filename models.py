@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn.functional import elu
 
 class MLP(nn.Module):
-    def __init__(self, input_features):
+    def __init__(self, input_features=4):
         super(MLP, self).__init__()
         n_feats = 20
         self.layer1 = nn.Linear(input_features, n_feats)
@@ -12,7 +12,7 @@ class MLP(nn.Module):
         self.layer4 = nn.Linear(n_feats, n_feats)
         self.layer5 = nn.Linear(n_feats, 2)
         self.activation = elu
-        self.bn = nn.BatchNorm1d(4)
+        # self.bn = nn.BatchNorm1d(4)
 
     def forward(self, x):
         # if x.dim() == 1:
@@ -25,11 +25,11 @@ class MLP(nn.Module):
         x = self.layer5(x)
         return x
 
-def load_nn(solver):
+def load_nn(solver, path=None):
     model = None
     if solver.endswith('nn'):
         model = MLP(4)
-        model.load_state_dict(torch.load('model.pt', weights_only=True))
+        model.load_state_dict(torch.load(path, weights_only=True))
         model.eval()
         model.to('cuda')
 
