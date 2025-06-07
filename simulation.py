@@ -2,7 +2,8 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from solvers import CabaretSolver, GodunovSolver, CabaretSolverNN, CabaretSolverPlus, RiemannSolver
+from solvers import CabaretSolver, GodunovSolver, CabaretSolverNN, CabaretSolverPlus, RiemannSolver, \
+    CabaretSolverPlusPlus
 from models import load_nn
 
 
@@ -22,6 +23,14 @@ class Simulation:
         if 'h' in config and 'u' in config and config['h'] is not None and config['u'] is not None:
             self.h = config['h']
             self.hu = config['h'] * config['u']
+
+
+            if isinstance(self.solver, GodunovSolver):
+                print(len(self.h))
+                self.h = self.h[::2]
+                self.hu = self.hu[::2]
+
+
         else:
             self.h, self.hu = self.initial_conditions()
 
@@ -29,13 +38,15 @@ class Simulation:
                 self.h, self.hu = self.new_grid(self.h, self.hu)
 
         self.x = np.linspace(-self.L, self.L, len(self.h), endpoint=True)
+
+        print(len(self.h), self.dx, self.x)
         # print(len(self.x))
         self.hu_final = None
         self.h_final = None
         self.h_rollout = []
         self.hu_rollout = []
 
-        self.t = 0
+        self.t = config['t_start']
 
     def initial_conditions(self):
         if isinstance(self.solver, GodunovSolver):
@@ -46,12 +57,21 @@ class Simulation:
         u = np.full(self.nx, self.u_r, dtype=np.float32)
         u[:self.nx // 2] = self.u_l
 
+        hu = h * u
+
         if isinstance(self.solver, GodunovSolver):
             i = self.nx // 2
             h[i] = (h[i - 1] + h[i + 1]) / 2
-            u[i] = (u[i - 1] + u[i + 1]) / 2
+            hu[i] = (hu[i - 1] + hu[i + 1]) / 2
 
-        hu = h * u
+            i -= 1
+            h[i] = (h[i - 1] + h[i + 1]) / 2
+            hu[i] = (hu[i - 1] + hu[i + 1]) / 2
+
+            i += 2
+            h[i] = (h[i - 1] + h[i + 1]) / 2
+            hu[i] = (hu[i - 1] + hu[i + 1]) / 2
+
         return h, hu
 
     def new_grid(self, h, hu):
@@ -185,7 +205,7 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
         else:
             x_plot = sim.x
             h_plot = sim.h_final
-        axes[0].plot(x_plot, h_plot, label=f'Final h ({label})')
+        axes[0].plot(x_plot, h_plot, label=f'{label}')
     axes[0].set_title('Water Height h')
     axes[0].legend()
     axes[0].grid(True)
@@ -202,9 +222,9 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
             hu_plot = sim.hu_final
         if plot_u:
             u_plot = np.where(h_plot > 1e-12, hu_plot / h_plot, 0.0)
-            axes[1].plot(x_plot, u_plot, label=f'Final u ({label})')
+            axes[1].plot(x_plot, u_plot, label=f'{label}')
         else:
-            axes[1].plot(x_plot, hu_plot, label=f'Final hu ({label})')
+            axes[1].plot(x_plot, hu_plot, label=f'{label}')
     axes[1].set_title('Velocity u' if plot_u else 'Momentum hu')
     axes[1].legend()
     axes[1].grid(True)
@@ -231,11 +251,11 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
         res = solver.solve(x_riem, t, h_l, u_l, h_r, u_r)
         h_riem, u_riem = res['vals']
         hu_riem = h_riem * u_riem
-        axes[0].plot(x_riem, h_riem, label='True h', linestyle=':', color='k')
+        axes[0].plot(x_riem, h_riem, label='True', linestyle=':', color='k')
         if plot_u:
-            axes[1].plot(x_riem, u_riem, label='True u', linestyle=':', color='k')
+            axes[1].plot(x_riem, u_riem, label='True', linestyle=':', color='k')
         else:
-            axes[1].plot(x_riem, hu_riem, label='True hu', linestyle=':', color='k')
+            axes[1].plot(x_riem, hu_riem, label='True', linestyle=':', color='k')
         axes[0].legend()
         axes[1].legend()
 
@@ -248,33 +268,44 @@ if __name__ == '__main__':
 
     config = {
         'L': 10,
-        'nx': 80,
+        'nx': 100,
 
-        # 'h_l': 1.0,
-        # 'h_r': 0.206612,
-        # 'u_l': 0,
-        # 'u_r': 3.416828,
+        'h_l': 1.0,
+        'h_r': 0.206612,
+        'u_l': 0,
+        'u_r': 3.416828,
 
         # 'h_l': 1.0,
         # 'h_r': 2.0,
         # 'u_l': 0,
         # 'u_r': 0,
 
-        'h_l': 3.39,
-        'h_r': 0.36,
-        'u_l': 0.49,
-        'u_r': 11.38,
+        # 'h_l': 3.39,
+        # 'h_r': 0.36,
+        # 'u_l': 0.49,
+        # 'u_r': 11.38,
 
-        # 'solver': GodunovSolver(solver_func='newton', model=None),
-        'solver': CabaretSolverPlus(model=model1),
-        't_end': 0.2
+        't_end': 2,
+        't_start': 0,
     }
 
 
+    if config['t_start'] != 0:
+        x = np.linspace(-config['L'], config['L'], 2 * config['nx'] + 1, endpoint=True)
+
+        solver = RiemannSolver()
+        h, u = solver.solve(x, config['t_start'], config['h_l'], config['u_l'], config['h_r'], config['u_r'])['vals']
+
+        config['h'] = h
+        config['u'] = u
+
+        # print(h, u)
+
+    config['solver'] = CabaretSolverPlus(model=model1)
     sim1 = Simulation(config)
     sim1.run()
     # sim.plot()
-    sim1.plot_animation()
+    # sim1.plot_animation()
 
     config['solver'] = GodunovSolver(solver_func='newton', model=None)
     sim2 = Simulation(config)
@@ -282,11 +313,11 @@ if __name__ == '__main__':
     # sim2.plot_animation()
 
 
-    config['solver'] = CabaretSolverPlus(model=model2)
+    config['solver'] = CabaretSolverPlus(model=None)
     # config['t_end'] = 0.2
     sim3 = Simulation(config)
     sim3.run()
-    sim3.plot_animation()
+    # sim3.plot_animation()
     # sim3.plot()
 
     # config['solver'] = CabaretSolver()
@@ -296,5 +327,5 @@ if __name__ == '__main__':
 
     # plot_comparison([sim1, sim2], labels=['Cabaret', 'Godunov'], plot_solution=True)
     # plot_comparison([sim1, sim2, sim3, sim4], labels=['CabaretNN', 'Godunov', 'Cabaret+', 'CabaretClassic'], plot_solution=True, plot_u=True)
-    plot_comparison([sim1, sim2, sim3], labels=['CabaretNN', 'Godunov', 'Cabaret+'], plot_solution=True)
+    plot_comparison([sim1, sim2, sim3], labels=['CabaretNN', 'Godunov', 'Cabaret+'], plot_solution=True, plot_u=True)
 
