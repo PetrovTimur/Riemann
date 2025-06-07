@@ -10,26 +10,32 @@ class Simulation:
     def __init__(self, config: dict):
         self.L = config['L']
         self.nx = config['nx']
-        self.h_l = config['h_l']
-        self.u_l = config['u_l']
-        self.h_r = config['h_r']
-        self.u_r = config['u_r']
+        self.h_l = config.get('h_l', None)
+        self.u_l = config.get('u_l', None)
+        self.h_r = config.get('h_r', None)
+        self.u_r = config.get('u_r', None)
         self.t_end = config['t_end']
         self.dx = 2 * self.L / self.nx
-        print(self.dx)
+        # print(self.dx)
         self.solver = config['solver']
 
-        self.h, self.hu = self.initial_conditions()
+        if 'h' in config and 'u' in config and config['h'] is not None and config['u'] is not None:
+            self.h = config['h']
+            self.hu = config['h'] * config['u']
+        else:
+            self.h, self.hu = self.initial_conditions()
 
-        if isinstance(self.solver, CabaretSolver):
-            self.h, self.hu = self.new_grid(self.h, self.hu)
+            if isinstance(self.solver, CabaretSolver):
+                self.h, self.hu = self.new_grid(self.h, self.hu)
 
         self.x = np.linspace(-self.L, self.L, len(self.h), endpoint=True)
-        print(len(self.x))
+        # print(len(self.x))
         self.hu_final = None
         self.h_final = None
         self.h_rollout = []
         self.hu_rollout = []
+
+        self.t = 0
 
     def initial_conditions(self):
         if isinstance(self.solver, GodunovSolver):
@@ -78,7 +84,8 @@ class Simulation:
         hu = self.hu.copy()
         self.h_rollout = [h.copy()]
         self.hu_rollout = [hu.copy()]
-        while t < self.t_end:
+        while self.t < self.t_end:
+            print(t)
             # u = np.where(h > 0, hu / h, 0)
             # c = np.sqrt(g * h)
             # dt = CFL * self.dx / np.max(np.abs(u + c))
@@ -98,7 +105,7 @@ class Simulation:
             dt = CFL * self.dx / max_abs_speed
 
             h, hu = self.solver.step(h.copy(), hu.copy(), self.dx, dt)
-            t += dt
+            self.t += dt
             self.h_rollout.append(h.copy())
             self.hu_rollout.append(hu.copy())
         self.h_final = h
@@ -206,7 +213,7 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
     if plot_solution:
         sim0 = sims[0]
         x = sim0.x
-        t = sim0.t_end if hasattr(sim0, 't_end') else 2.0
+        t = sim0.t if hasattr(sim0, 't_end') else 2.0
         h_l = sim0.h_l if hasattr(sim0, 'h_l') else 1.0
         h_r = sim0.h_r if hasattr(sim0, 'h_r') else 0.2
         u_l = sim0.u_l if hasattr(sim0, 'u_l') else 0.0
@@ -219,7 +226,7 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
             u_r = riemann_kwargs.get('u_r', u_r)
             t = riemann_kwargs.get('t', t)
             L = riemann_kwargs.get('L', L)
-        x_riem = np.linspace(-L, L, len(x), endpoint=True)
+        x_riem = np.linspace(-L, L, 1 * len(x), endpoint=True)
         solver = RiemannSolver()
         res = solver.solve(x_riem, t, h_l, u_l, h_r, u_r)
         h_riem, u_riem = res['vals']
@@ -236,30 +243,38 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
     plt.show()
 
 if __name__ == '__main__':
-    model = load_nn('generic_nn', path='checkpoints/model_ood_1.pt')
+    model1 = load_nn(path='checkpoints/model_new_1.pt', input_features=14)
+    model2 = load_nn(path='checkpoints/model_new_4.pt', input_features=14, n_feats=40)
 
     config = {
         'L': 10,
-        'nx': 20,
+        'nx': 80,
 
         # 'h_l': 1.0,
         # 'h_r': 0.206612,
         # 'u_l': 0,
         # 'u_r': 3.416828,
 
-        'h_l': 1.0,
-        'h_r': 2.0,
-        'u_l': 0,
-        'u_r': 0,
+        # 'h_l': 1.0,
+        # 'h_r': 2.0,
+        # 'u_l': 0,
+        # 'u_r': 0,
+
+        'h_l': 3.39,
+        'h_r': 0.36,
+        'u_l': 0.49,
+        'u_r': 11.38,
 
         # 'solver': GodunovSolver(solver_func='newton', model=None),
-        'solver': CabaretSolverNN(model=model),
-        't_end': 2.0
+        'solver': CabaretSolverPlus(model=model1),
+        't_end': 0.2
     }
+
+
     sim1 = Simulation(config)
     sim1.run()
     # sim.plot()
-    # sim1.plot_animation()
+    sim1.plot_animation()
 
     config['solver'] = GodunovSolver(solver_func='newton', model=None)
     sim2 = Simulation(config)
@@ -267,13 +282,19 @@ if __name__ == '__main__':
     # sim2.plot_animation()
 
 
-    config['solver'] = CabaretSolverPlus(model=None)
+    config['solver'] = CabaretSolverPlus(model=model2)
     # config['t_end'] = 0.2
     sim3 = Simulation(config)
     sim3.run()
     sim3.plot_animation()
     # sim3.plot()
 
+    # config['solver'] = CabaretSolver()
+    # sim4 = Simulation(config)
+    # sim4.run()
+    # sim4.plot_animation()
 
     # plot_comparison([sim1, sim2], labels=['Cabaret', 'Godunov'], plot_solution=True)
-    plot_comparison([sim1, sim2, sim3], labels=['Cabaret', 'Godunov', 'Cabaret++'], plot_solution=True, plot_u=True)
+    # plot_comparison([sim1, sim2, sim3, sim4], labels=['CabaretNN', 'Godunov', 'Cabaret+', 'CabaretClassic'], plot_solution=True, plot_u=True)
+    plot_comparison([sim1, sim2, sim3], labels=['CabaretNN', 'Godunov', 'Cabaret+'], plot_solution=True)
+
