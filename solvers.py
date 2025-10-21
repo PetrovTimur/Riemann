@@ -209,6 +209,13 @@ def riemann_solver_nn(hL, huL, hR, huR, model, g=9.8066):
     return flux_i
 
 
+def nn_solver(data, model):
+    inputs = torch.tensor(data, dtype=torch.float32)
+    I1, I2 = model(inputs.to('cuda')).cpu().detach().numpy()
+
+    return I1, I2
+
+
 class Solver:
     def __init__(self):
         pass
@@ -294,8 +301,8 @@ class CabaretSolver(Solver):
         self.u = self.hu / (self.h + 1e-12)
 
         # Инварианты на n-м слое по времени
-        self.neg_char = self.u - 2 * np.sqrt(np.maximum(0, self.g * self.h))
-        self.pos_char = self.u + 2 * np.sqrt(np.maximum(0, self.g * self.h))
+        self.neg_char = self.u - 1 * np.sqrt(np.maximum(0, self.g * self.h))
+        self.pos_char = self.u + 1 * np.sqrt(np.maximum(0, self.g * self.h))
 
         self.h[1::2] -= self.dt / (2 * self.dx) * (self.hu[2::2] - self.hu[:-1:2])
         self.hu[1::2] -= self.dt / (2 * self.dx) * ((self.h[2::2] * (self.u[2::2]) ** 2 + 0.5 * self.g * self.h[2::2] ** 2) - (self.h[:-1:2] * (self.u[:-1:2]) ** 2 + 0.5 * self.g * self.h[:-1:2] ** 2))
@@ -305,8 +312,8 @@ class CabaretSolver(Solver):
         self.u = self.hu / (self.h + 1e-12)
 
         # В четных точках старые инварианты (n слой), в консервативных точках на полуцелом шаге по времени (n + 1/2)
-        neg_char_new = self.u - 2 * np.sqrt(np.maximum(0, self.g * self.h))
-        pos_char_new = self.u + 2 * np.sqrt(np.maximum(0, self.g * self.h))
+        neg_char_new = self.u - 1 * np.sqrt(np.maximum(0, self.g * self.h))
+        pos_char_new = self.u + 1 * np.sqrt(np.maximum(0, self.g * self.h))
 
         for i in range(2, neg_char_new.shape[0] - 1, 2):
             # lambda_left_neg = self.u[i - 1] - (self.g * self.h[i - 1]) ** 0.5
@@ -314,20 +321,8 @@ class CabaretSolver(Solver):
             # lambda_right_neg = self.u[i + 1] - (self.g * self.h[i + 1]) ** 0.5
             # lambda_right_pos = self.u[i + 1] + (self.g * self.h[i + 1]) ** 0.5
 
-            # Нейр
-            if self.solver_func == 'selective_nn' and ((np.sign(lambda_left_neg) != np.sign(lambda_right_neg)) or (
-                    np.sign(lambda_left_pos) != np.sign(lambda_right_pos))):
-                # print('test')
-                fluxx = riemann_solver_nn(self.h[i - 1], self.hu[i - 1], self.h[i + 1], self.hu[i + 1], self.model,
-                                          self.g)
-                _, _, hh, uu = fluxx
-                neg_char_new[i] = uu - 2 * (np.maximum(1e-12, self.g * hh)) ** 0.5
-                pos_char_new[i] = uu + 2 * (np.maximum(1e-12, self.g * hh)) ** 0.5
-
-            # Обычная линейная экстраполяция
-            else:
-                neg_char_new[i] = 2 * neg_char_new[i + 1] - self.neg_char[i + 2]
-                pos_char_new[i] = 2 * pos_char_new[i - 1] - self.pos_char[i - 2]
+            neg_char_new[i] = 2 * neg_char_new[i + 1] - self.neg_char[i + 2]
+            pos_char_new[i] = 2 * pos_char_new[i - 1] - self.pos_char[i - 2]
 
             # print(i // 2, pos_char_new[i], neg_char_new[i])
 
@@ -335,7 +330,7 @@ class CabaretSolver(Solver):
 
         for i in range(2, len(self.u) - 1, 2):
             self.u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
-            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 4) ** 2 / self.g
+            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 2) ** 2 / self.g
             self.hu[i] = self.h[i] * self.u[i]
 
     def _step3(self):
@@ -369,181 +364,121 @@ class CabaretSolver(Solver):
 
 
 class CabaretSolverPlus(CabaretSolver):
-    def __init__(self, model, g=9.81):
-        """
-        Initializes the CABARET solver with gravitational acceleration.
-        Assumes a flat bottom (b=0) for shallow water equations.
-
-        Args:
-            g (float): Acceleration due to gravity (default: 9.81 m/s^2).
-        """
+    def __init__(self, model, g=9.806):
         super().__init__(g=g)
 
-        # Internal state variables to hold data for the current time step.
-        # 'combined' arrays contain both nodal (even indices) and cell-centered (odd indices) values.
         self.h_combined_n = None
         self.hu_combined_n = None
 
-        # Derived views/copies for easier indexing of nodal and cell-centered values at time 'n'.
-        self.h_node_n = None  # Nodal H at time n (H_i^n)
-        self.hu_node_n = None  # Nodal Hu at time n (Hu_i^n)
-        self.u_node_n = None  # Nodal u at time n (u_i^n)
+        self.h_node_n = None
+        self.hu_node_n = None
+        self.u_node_n = None
 
-        self.h_cell_n = None  # Cell-centered H at time n (H_i+1/2^n)
-        self.hu_cell_n = None  # Cell-centered Hu at time n (Hu_i+1/2^n)
+        self.h_cell_n = None
+        self.hu_cell_n = None
 
-        # Intermediate results for the CABARET scheme steps:
-        self.h_cell_n_plus_half = None  # H_i+1/2^(n+1/2) - conservative variables at cell centers, intermediate time
-        self.hu_cell_n_plus_half = None  # Hu_i+1/2^(n+1/2) - conservative variables at cell centers, intermediate time
+        self.h_cell_n_plus_half = None
+        self.hu_cell_n_plus_half = None
 
-        self.h_node_n_plus_1_char = None  # H_i^(n+1) - provisional nodal values from characteristic step
-        self.hu_node_n_plus_1_char = None  # Hu_i^(n+1) - provisional nodal values from characteristic step
+        self.h_node_n_plus_1_char = None
+        self.hu_node_n_plus_1_char = None
 
-        self.h_cell_n_plus_1 = None  # H_i+1/2^(n+1) - final conservative variables at cell centers, new time
-        self.hu_cell_n_plus_1 = None  # Hu_i+1/2^(n+1) - final conservative variables at cell centers, new time
+        self.h_cell_n_plus_1 = None
+        self.hu_cell_n_plus_1 = None
 
-        # Spatial and temporal discretizations parameters:
-        self.dx = None  # Single float for uniform cell width.
-        self.dt = None  # Single float for time step.
+        self.dx = None
+        self.dt = None
 
-        # Dimensions of the grid (derived from input array lengths):
-        self.N_total_points = 0  # Total number of points in the combined array.
-        # N_total_points = 2 * N_cells + 1.
-        self.N_nodes = 0  # Number of nodal points (N_nodes = N_cells + 1).
-        self.N_cells = 0  # Number of computational cells.
+        self.N_total_points = 0
+        self.N_nodes = 0
+        self.N_cells = 0
+
+        self.model = model
 
     def F_m(self, H, u):
-        """Mass flux function F_m = Hu."""
         return H * u
 
     def F_h(self, H, u):
-        """Momentum flux function F_h = Hu^2 + g/2 H^2."""
         return H * u ** 2 + 0.5 * self.g * H ** 2
 
     def _step1(self):
-        """
-        Step 1: Compute intermediate conservative variables at cell centers (n+1/2).
-        Uses an explicit conservative scheme (Eq. 3 from the paper, simplified for b=0).
-        Inputs: self.h_node_n, self.hu_node_n (at time n, nodal), self.h_cell_n, self.hu_cell_n (at time n, cell-centered).
-        Outputs: Populates self.h_cell_n_plus_half, self.hu_cell_n_plus_half (at time n+1/2, cell-centered).
-        """
-        # Calculate u_node at time n for flux computation.
-        # Add a small epsilon to avoid division by zero if H is zero.
         self.u_node_n = self.hu_node_n / (self.h_node_n + 1e-12)
 
         self.h_cell_n_plus_half = np.zeros(self.N_cells)
         self.hu_cell_n_plus_half = np.zeros(self.N_cells)
 
         for i in range(self.N_cells):
-            # H_i+1/2^n and Hu_i+1/2^n are directly available from the odd indices of the input combined array.
             h_cell_n_curr = self.h_cell_n[i]
             hu_cell_n_curr = self.hu_cell_n[i]
 
-            # Fluxes at nodes i and i+1 using nodal values at time n.
             flux_m_i = self.F_m(self.h_node_n[i], self.u_node_n[i])
             flux_m_i_plus_1 = self.F_m(self.h_node_n[i + 1], self.u_node_n[i + 1])
 
             flux_h_i = self.F_h(self.h_node_n[i], self.u_node_n[i])
             flux_h_i_plus_1 = self.F_h(self.h_node_n[i + 1], self.u_node_n[i + 1])
 
-            # Apply explicit update for conservative variables (based on Eq. 3 with b=0).
             self.h_cell_n_plus_half[i] = h_cell_n_curr - 0.5 * self.dt / self.dx * (flux_m_i_plus_1 - flux_m_i)
             self.hu_cell_n_plus_half[i] = hu_cell_n_curr - 0.5 * self.dt / self.dx * (flux_h_i_plus_1 - flux_h_i)
 
     def _correct_invariants(self, extrapolated_invariant, min_bound, max_bound):
-        """
-        Applies nonlinear correction to an extrapolated Riemann invariant (Chapter 6).
-        This clips the extrapolated value to be within the min/max bounds of the surrounding points.
-
-        Args:
-            extrapolated_invariant (float): The Riemann invariant value after extrapolation.
-            min_bound (float): The minimum value among relevant points at time 'n'.
-            max_bound (float): The maximum value among relevant points at time 'n'.
-
-        Returns:
-            float: The corrected (clipped) Riemann invariant.
-        """
         return np.clip(extrapolated_invariant, min_bound, max_bound)
 
     def _step2(self):
-        """
-        Step 2: Compute provisional nodal flux variables (H_i^(n+1), Hu_i^(n+1)) using the characteristic method.
-        This step integrates:
-        1. Transsonic point handling (Chapter 8, using averaged characteristic speeds for extrapolation direction).
-        2. Nonlinear correction (Chapter 6, applying max/min principle to Riemann invariants).
-
-        Inputs: self.h_cell_n_plus_half, self.hu_cell_n_plus_half (at n+1/2, cell-centered),
-                self.h_node_n, self.hu_node_n (at n, nodal), self.h_cell_n, self.hu_cell_n (at n, cell-centered).
-        Outputs: Populates self.h_node_n_plus_1_char, self.hu_node_n_plus_1_char (provisional nodal values at time n+1).
-        """
-        # Calculate u, c, I1, I2 (Riemann invariants) at cell centers at n+1/2.
         u_cell_n_plus_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + 1e-12)
         c_cell_n_plus_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
 
-        # Using Riemann invariants as defined in the paper (below Eq. 7, page 4): I1 = u + c, I2 = u - c
         I1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
         I2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
 
-        # Characteristic speeds (lambda values) are still defined as u +/- c (as in Eq. 2 of the paper).
-        # These are numerically equivalent to the chosen Riemann invariants I1, I2 in this paper's formulation.
         lambda1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
         lambda2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
 
-        # Calculate u, c, I1, I2 at nodes at time n.
         u_node_n = self.hu_node_n / (self.h_node_n + 1e-12)
         c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
-        # Using Riemann invariants as defined in the paper for extrapolation.
+
         I1_node_n = u_node_n + c_node_n
         I2_node_n = u_node_n - c_node_n
 
-        # Calculate u, c, I1, I2 at cell centers at time n (for nonlinear correction bounds).
         u_cell_n = self.hu_cell_n / (self.h_cell_n + 1e-12)
         c_cell_n = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n))
-        # Using Riemann invariants as defined in the paper for bounds.
+
         I1_cell_n = u_cell_n + c_cell_n
         I2_cell_n = u_cell_n - c_cell_n
 
-        # Initialize arrays for new nodal Riemann invariants at n+1.
         I1_node_n_plus_1 = np.zeros(self.N_nodes)
         I2_node_n_plus_1 = np.zeros(self.N_nodes)
 
         self.h_node_n_plus_1_char = np.zeros(self.N_nodes)
         self.hu_node_n_plus_1_char = np.zeros(self.N_nodes)
 
-        # Apply extrapolation for interior nodes (j from 1 to N_nodes-2).
         for j in range(1, self.N_nodes - 1):
-            # --- Chapter 8: Transsonic Point Handling (Extrapolation Direction) ---
-            # Determine effective characteristic speed at node j by averaging adjacent cell values (Chapter 8, Eq. 13).
-            # Cell j-1 is to the left of node j, and Cell j is to the right of node j.
             lambda1_avg_at_node_j = 0.5 * (lambda1_cell_n_plus_half[j - 1] + lambda1_cell_n_plus_half[j])
             lambda2_avg_at_node_j = 0.5 * (lambda2_cell_n_plus_half[j - 1] + lambda2_cell_n_plus_half[j])
 
-            # Extrapolate I1 based on averaged lambda1 (Eq. from Chapter 5, simplified).
-            if lambda1_avg_at_node_j > 0:  # Characteristic comes from the left (cell j-1).
+            if lambda1_avg_at_node_j > 0:
                 I1_extrapolated = 2 * I1_cell_n_plus_half[j - 1] - I1_node_n[j - 1]
-                relevant_cell_idx_I1 = j - 1  # For nonlinear correction, bounds come from this cell
-            else:  # Characteristic comes from the right (cell j).
+                relevant_cell_idx_I1 = j - 1
+            else:
                 I1_extrapolated = 2 * I1_cell_n_plus_half[j] - I1_node_n[j + 1]
-                relevant_cell_idx_I1 = j  # For nonlinear correction, bounds come from this cell
+                relevant_cell_idx_I1 = j
 
-            # Extrapolate I2 based on averaged lambda2.
-            if lambda2_avg_at_node_j > 0:  # Characteristic comes from the left (cell j-1).
+            if lambda2_avg_at_node_j > 0:
                 I2_extrapolated = 2 * I2_cell_n_plus_half[j - 1] - I2_node_n[j - 1]
-                relevant_cell_idx_I2 = j - 1  # For nonlinear correction, bounds come from this cell
-            else:  # Characteristic comes from the right (cell j).
+                relevant_cell_idx_I2 = j - 1
+            else:
                 I2_extrapolated = 2 * I2_cell_n_plus_half[j] - I2_node_n[j + 1]
-                relevant_cell_idx_I2 = j  # For nonlinear correction, bounds come from this cell
+                relevant_cell_idx_I2 = j
 
-            if relevant_cell_idx_I1 >= relevant_cell_idx_I2:
-                print('hhh: ', j)
+            if (relevant_cell_idx_I1 >= relevant_cell_idx_I2) and (self.model is not None):
+                print('hhh: ', j, relevant_cell_idx_I1, relevant_cell_idx_I2, self.h_cell_n_plus_half[relevant_cell_idx_I1], self.h_cell_n_plus_half[relevant_cell_idx_I2])
 
+                data = [I1_node_n[j - 1], I1_node_n[j], I1_node_n[j + 1], I2_node_n[j - 1], I2_node_n[j], I2_node_n[j + 1],
+                        I1_cell_n_plus_half[j - 1], I1_cell_n_plus_half[j], I2_cell_n_plus_half[j - 1], I2_cell_n_plus_half[j],
+                        I1_cell_n[j - 1], I1_cell_n[j], I2_cell_n[j - 1], I2_cell_n[j]]
+
+                I1, I2 = nn_solver(data, self.model)
             # print(j, I1_extrapolated, I2_extrapolated)
 
-            # --- Chapter 6: Nonlinear Correction of Riemann Invariants ---
-            # Calculate bounds for I1 from the relevant cell (based on Chapter 6 text and formulas).
-            # The bounds for a cell_idx (e.g., cell i+1/2) are derived from values at node i, cell i+1/2, node i+1.
-            # Using I1_node_n[relevant_cell_idx_I1], I1_cell_n[relevant_cell_idx_I1], I1_node_n[relevant_cell_idx_I1+1]
-            # to determine the min/max range for the current cell's neighborhood.
             max_I1_bound = np.max([I1_node_n[relevant_cell_idx_I1],
                                    I1_cell_n[relevant_cell_idx_I1],
                                    I1_node_n[relevant_cell_idx_I1 + 1]])
@@ -551,10 +486,8 @@ class CabaretSolverPlus(CabaretSolver):
                                    I1_cell_n[relevant_cell_idx_I1],
                                    I1_node_n[relevant_cell_idx_I1 + 1]])
 
-            # Apply correction to I1 using the dedicated function.
             I1_node_n_plus_1[j] = self._correct_invariants(I1_extrapolated, min_I1_bound, max_I1_bound)
 
-            # Calculate bounds for I2 from the relevant cell.
             max_I2_bound = np.max([I2_node_n[relevant_cell_idx_I2],
                                    I2_cell_n[relevant_cell_idx_I2],
                                    I2_node_n[relevant_cell_idx_I2 + 1]])
@@ -562,121 +495,259 @@ class CabaretSolverPlus(CabaretSolver):
                                    I2_cell_n[relevant_cell_idx_I2],
                                    I2_node_n[relevant_cell_idx_I2 + 1]])
 
-            # Apply correction to I2 using the dedicated function.
             I2_node_n_plus_1[j] = self._correct_invariants(I2_extrapolated, min_I2_bound, max_I2_bound)
 
-            # --- Chapter 7: Invert Riemann invariants to get u and H at the provisional nodes n+1 (Eq. 12) ---
-            # G_k* = g / c_k*, where c_k* is the wave speed from the cell the characteristic k originated from.
-            # We need to ensure c_cell_n_plus_half[relevant_cell_idx_I1/I2] is not zero.
             g1_star = self.g / (c_cell_n_plus_half[relevant_cell_idx_I1] + 1e-12)
             g2_star = self.g / (c_cell_n_plus_half[relevant_cell_idx_I2] + 1e-12)
 
-            # Reconstruct H at node j (H_j^(n+1))
-            # self.h_node_n_plus_1_char[j] = (I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / (g1_star + g2_star)
-            # Reconstruct u at node j (u_j^(n+1))
-            # u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] * g2_star + I2_node_n_plus_1[j] * g1_star) / (g1_star + g2_star)
-            self.h_node_n_plus_1_char[j] = ((I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / 2) ** 2 / self.g
-            u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] + I2_node_n_plus_1[j]) / 2
+            if (relevant_cell_idx_I1 >= relevant_cell_idx_I2) and (self.model is not None) and (self.h_node_n[j - 1] != self.h_node_n[j + 1]):
+                I1_node_n_plus_1[j] = I1
+                I2_node_n_plus_1[j] = I2
 
-            # Ensure H is not negative due to numerical errors; set a small positive floor before computing Hu.
+            # if False:
+            if self.model is not None:
+                self.h_node_n_plus_1_char[j] = ((I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / 2) ** 2 / self.g
+                u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] + I2_node_n_plus_1[j]) / 2
+            else:
+                self.h_node_n_plus_1_char[j] = (I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / (g1_star + g2_star)
+                u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] * g2_star + I2_node_n_plus_1[j] * g1_star) / (g1_star + g2_star)
+
+
             self.h_node_n_plus_1_char[j] = np.maximum(0.0, self.h_node_n_plus_1_char[j])
             self.hu_node_n_plus_1_char[j] = self.h_node_n_plus_1_char[j] * u_node_n_plus_1_at_j
 
 
-        # Apply boundary conditions to the provisional nodal values (at Node 0 and Node N_nodes-1).
-        # For this example, we assume fixed boundary conditions, copying from the initial state at 'n'.
-        # These provisional boundary values will be used directly in the final output.
         self.h_node_n_plus_1_char[0] = self.h_node_n[0]
         self.hu_node_n_plus_1_char[0] = self.hu_node_n[0]
         self.h_node_n_plus_1_char[self.N_nodes - 1] = self.h_node_n[self.N_nodes - 1]
         self.hu_node_n_plus_1_char[self.N_nodes - 1] = self.hu_node_n[self.N_nodes - 1]
 
     def _step3(self):
-        """
-        Step 3: Compute final conservative variables at cell centers (n+1).
-        Uses an implicit conservative scheme (Eq. 4 from the paper, simplified for b=0).
-        Inputs: self.h_cell_n_plus_half, self.hu_cell_n_plus_half (at n+1/2, cell-centered),
-                self.h_node_n_plus_1_char, self.hu_node_n_plus_1_char (provisional at n+1, nodal).
-        Outputs: Populates self.h_cell_n_plus_1, self.hu_cell_n_plus_1 (final cell-centered values at n+1).
-        """
-        # Calculate u_node at n+1 from the provisional nodal values.
-        # Add a small epsilon to avoid division by zero if H is zero.
         u_node_n_plus_1_char = self.hu_node_n_plus_1_char / (self.h_node_n_plus_1_char + 1e-12)
 
         self.h_cell_n_plus_1 = np.zeros(self.N_cells)
         self.hu_cell_n_plus_1 = np.zeros(self.N_cells)
 
         for i in range(self.N_cells):
-            # Fluxes at nodes i and i+1 using the provisional nodal values at n+1.
             flux_m_i_n_plus_1 = self.F_m(self.h_node_n_plus_1_char[i], u_node_n_plus_1_char[i])
             flux_m_i_plus_1_n_plus_1 = self.F_m(self.h_node_n_plus_1_char[i + 1], u_node_n_plus_1_char[i + 1])
 
             flux_h_i_n_plus_1 = self.F_h(self.h_node_n_plus_1_char[i], u_node_n_plus_1_char[i])
             flux_h_i_plus_1_n_plus_1 = self.F_h(self.h_node_n_plus_1_char[i + 1], u_node_n_plus_1_char[i + 1])
 
-            # Apply implicit update for conservative variables (based on Eq. 4 with b=0).
             self.h_cell_n_plus_1[i] = self.h_cell_n_plus_half[i] - \
                                       0.5 * self.dt / self.dx * (flux_m_i_plus_1_n_plus_1 - flux_m_i_n_plus_1)
             self.hu_cell_n_plus_1[i] = self.hu_cell_n_plus_half[i] - \
                                        0.5 * self.dt / self.dx * (flux_h_i_plus_1_n_plus_1 - flux_h_i_n_plus_1)
 
     def step(self, h_n_total_points, hu_n_total_points, dx, dt):
-        """
-        Performs one time step for the CABARET scheme, updating values from time 'n' to 'n+1'.
-
-        Args:
-            h_n_total_points (np.array): Combined array of H values at current time 'n'.
-                                         - Even indices (0, 2, 4, ...): H_i^n (nodal values).
-                                         - Odd indices (1, 3, 5, ...): H_i+1/2^n (cell-centered values).
-            hu_n_total_points (np.array): Combined array of Hu values at current time 'n'.
-                                          Same indexing convention as h_n_total_points.
-            dx (float): The uniform cell width for the computational grid.
-            dt (float): The time step for the current iteration.
-
-        Returns:
-            tuple: (h_n_plus_1_total_points, hu_n_plus_1_total_points)
-                   Updated combined H and Hu arrays at time 'n+1', following the same
-                   indexing convention as the input.
-        """
-        # Store input values and determine grid dimensions for the current time step.
         self.h_combined_n = h_n_total_points.copy()
         self.hu_combined_n = hu_n_total_points.copy()
         self.dx = dx
         self.dt = dt
 
         self.N_total_points = len(self.h_combined_n)
-        # Assuming N_total_points = 2 * N_cells + 1 (e.g., 3 points -> 1 cell, 5 points -> 2 cells)
         self.N_cells = (self.N_total_points - 1) // 2
-        self.N_nodes = self.N_cells + 1  # Total nodes is N_cells + 1
+        self.N_nodes = self.N_cells + 1
 
-        # Extract nodal and cell-centered values from the combined input array for clarity in steps.
-        self.h_node_n = self.h_combined_n[::2]  # H_0^n, H_1^n, ..., H_N_nodes-1^n
-        self.hu_node_n = self.hu_combined_n[::2]  # Hu_0^n, Hu_1^n, ..., Hu_N_nodes-1^n
-        self.h_cell_n = self.h_combined_n[1::2]  # H_0+1/2^n, H_1+1/2^n, ..., H_N_cells-1+1/2^n
-        self.hu_cell_n = self.hu_combined_n[1::2]  # Hu_0+1/2^n, Hu_1+1/2^n, ..., Hu_N_cells-1+1/2^n
+        self.h_node_n = self.h_combined_n[::2]
+        self.hu_node_n = self.hu_combined_n[::2]
+        self.h_cell_n = self.h_combined_n[1::2]
+        self.hu_cell_n = self.hu_combined_n[1::2]
 
-        # Execute the three main steps of the CABARET algorithm.
-        self._step1()  # Computes self.h_cell_n_plus_half, self.hu_cell_n_plus_half
-        self._step2()  # Computes self.h_node_n_plus_1_char, self.hu_node_n_plus_1_char (provisional nodal values with nonlinear correction)
+        self._step1()
+        self._step2()
         # print(dt, dx, self.h_node_n_plus_1_char)
-        self._step3()  # Computes self.h_cell_n_plus_1, self.hu_cell_n_plus_1 (final cell-centered values)
+        self._step3()
 
-        # Assemble the final combined output array for time 'n+1'.
         h_n_plus_1_total_points = np.zeros(self.N_total_points)
         hu_n_plus_1_total_points = np.zeros(self.N_total_points)
 
-        # Populate odd indices with the final cell-centered values computed in _step3.
-        # These correspond to H_i+1/2^(n+1) and Hu_i+1/2^(n+1).
+        # Fix border points
+        self.h_cell_n_plus_1[0] = self.h_cell_n[0]
+        self.hu_cell_n_plus_1[0] = self.hu_cell_n[0]
+
+        self.h_cell_n_plus_1[-1] = self.h_cell_n[-1]
+        self.hu_cell_n_plus_1[-1] = self.hu_cell_n[-1]
+
+        # Fix border points
+        self.h_node_n_plus_1_char[0] = self.h_node_n_plus_1_char[1]
+        self.hu_node_n_plus_1_char[0] = self.hu_node_n_plus_1_char[1]
+
+        self.h_node_n_plus_1_char[-1] = self.h_node_n_plus_1_char[-2]
+        self.hu_node_n_plus_1_char[-1] = self.hu_node_n_plus_1_char[-2]
+
         h_n_plus_1_total_points[1::2] = self.h_cell_n_plus_1
         hu_n_plus_1_total_points[1::2] = self.hu_cell_n_plus_1
 
-        # Populate even indices with the final nodal values.
-        # These come directly from the "potokovye peremennye na novom vremennom sloe" computed in _step2.
         h_n_plus_1_total_points[::2] = self.h_node_n_plus_1_char
         hu_n_plus_1_total_points[::2] = self.hu_node_n_plus_1_char
 
+        # print(self.h_node_n)
+        # print(self.h_node_n_plus_1_char)
+
         return h_n_plus_1_total_points, hu_n_plus_1_total_points
 
+
+class CabaretSolverPlusPlus(CabaretSolverPlus):
+    def __init__(self, model=None, g=9.806):
+        super().__init__(model=model, g=g)
+
+    def _step2(self):
+        u_cell_n_plus_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + 1e-12)
+        c_cell_n_plus_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
+
+        I1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
+        I2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
+
+        lambda1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
+        lambda2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
+
+        u_node_n = self.hu_node_n / (self.h_node_n + 1e-12)
+        c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
+        I1_node_n = u_node_n + c_node_n
+        I2_node_n = u_node_n - c_node_n
+
+        u_cell_n = self.hu_cell_n / (self.h_cell_n + 1e-12)
+        c_cell_n = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n))
+        I1_cell_n = u_cell_n + c_cell_n
+        I2_cell_n = u_cell_n - c_cell_n
+
+        I1_node_n_plus_1 = np.zeros(self.N_nodes)
+        I2_node_n_plus_1 = np.zeros(self.N_nodes)
+
+        self.h_node_n_plus_1_char = np.zeros(self.N_nodes)
+        self.hu_node_n_plus_1_char = np.zeros(self.N_nodes)
+
+        for j in range(1, self.N_nodes - 1):
+            is_sonic_point_lambda1 = (
+                        np.sign(lambda1_cell_n_plus_half[j - 1]) * np.sign(lambda1_cell_n_plus_half[j]) < 0)
+            is_sonic_point_lambda2 = (
+                        np.sign(lambda2_cell_n_plus_half[j - 1]) * np.sign(lambda2_cell_n_plus_half[j]) < 0)
+
+            if is_sonic_point_lambda1:
+                u_j_n_plus_half_interp = 0.5 * (u_cell_n_plus_half[j - 1] + u_cell_n_plus_half[j])
+                c_j_n_plus_half_interp = 0.5 * (c_cell_n_plus_half[j - 1] + c_cell_n_plus_half[j])
+
+                lambda1_to_use_for_direction = u_j_n_plus_half_interp + c_j_n_plus_half_interp
+            else:
+                lambda1_to_use_for_direction = 0.5 * (lambda1_cell_n_plus_half[j - 1] + lambda1_cell_n_plus_half[j])
+
+            if lambda1_to_use_for_direction >= 0:
+                I1_extrapolated = 2 * I1_cell_n_plus_half[j - 1] - I1_node_n[j - 1]
+                relevant_cell_idx_I1 = j - 1
+            else:
+                I1_extrapolated = 2 * I1_cell_n_plus_half[j] - I1_node_n[j + 1]
+                relevant_cell_idx_I1 = j
+
+            lambda2_to_use_for_direction = 0.0
+            if is_sonic_point_lambda2:
+                u_j_n_plus_half_interp = 0.5 * (u_cell_n_plus_half[j - 1] + u_cell_n_plus_half[j])
+                c_j_n_plus_half_interp = 0.5 * (c_cell_n_plus_half[j - 1] + c_cell_n_plus_half[j])
+                lambda2_to_use_for_direction = u_j_n_plus_half_interp - c_j_n_plus_half_interp
+            else:
+                lambda2_to_use_for_direction = 0.5 * (lambda2_cell_n_plus_half[j - 1] + lambda2_cell_n_plus_half[j])
+
+            if lambda2_to_use_for_direction >= 0:
+                I2_extrapolated = 2 * I2_cell_n_plus_half[j - 1] - I2_node_n[j - 1]
+                relevant_cell_idx_I2 = j - 1
+            else:
+                I2_extrapolated = 2 * I2_cell_n_plus_half[j] - I2_node_n[j + 1]
+                relevant_cell_idx_I2 = j
+
+            max_I1_bound = np.max([I1_node_n[relevant_cell_idx_I1],
+                                   I1_cell_n[relevant_cell_idx_I1],
+                                   I1_node_n[relevant_cell_idx_I1 + 1]])
+            min_I1_bound = np.min([I1_node_n[relevant_cell_idx_I1],
+                                   I1_cell_n[relevant_cell_idx_I1],
+                                   I1_node_n[relevant_cell_idx_I1 + 1]])
+
+            I1_node_n_plus_1[j] = self._correct_invariants(I1_extrapolated, min_I1_bound, max_I1_bound)
+
+            max_I2_bound = np.max([I2_node_n[relevant_cell_idx_I2],
+                                   I2_cell_n[relevant_cell_idx_I2],
+                                   I2_node_n[relevant_cell_idx_I2 + 1]])
+            min_I2_bound = np.min([I2_node_n[relevant_cell_idx_I2],
+                                   I2_cell_n[relevant_cell_idx_I2],
+                                   I2_node_n[relevant_cell_idx_I2 + 1]])
+
+            I2_node_n_plus_1[j] = self._correct_invariants(I2_extrapolated, min_I2_bound, max_I2_bound)
+
+            g1_star = self.g / (c_cell_n_plus_half[relevant_cell_idx_I1] + 1e-12)
+            g2_star = self.g / (c_cell_n_plus_half[relevant_cell_idx_I2] + 1e-12)
+
+            self.h_node_n_plus_1_char[j] = (I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / (g1_star + g2_star)
+            u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] * g2_star + I2_node_n_plus_1[j] * g1_star) / (g1_star + g2_star)
+
+            self.h_node_n_plus_1_char[j] = np.maximum(0.0, self.h_node_n_plus_1_char[j])
+            self.hu_node_n_plus_1_char[j] = self.h_node_n_plus_1_char[j] * u_node_n_plus_1_at_j
+
+        self.h_node_n_plus_1_char[0] = self.h_node_n[0]
+        self.hu_node_n_plus_1_char[0] = self.hu_node_n[0]
+        self.h_node_n_plus_1_char[self.N_nodes - 1] = self.h_node_n[self.N_nodes - 1]
+        self.hu_node_n_plus_1_char[self.N_nodes - 1] = self.hu_node_n[self.N_nodes - 1]
+
+class CabaretSolverGT(CabaretSolverPlus):
+    def __init__(self, model=None, g=9.806):
+        super().__init__(model=model, g=g)
+
+    def step(self, h_n_total_points, hu_n_total_points, dx, dt, riemann_h, riemann_u):
+        self.h_combined_n = h_n_total_points.copy()
+        self.hu_combined_n = hu_n_total_points.copy()
+        self.dx = dx
+        self.dt = dt
+
+        self.N_total_points = len(self.h_combined_n)
+        self.N_cells = (self.N_total_points - 1) // 2
+        self.N_nodes = self.N_cells + 1
+
+        self.h_node_n = self.h_combined_n[::2]
+        self.hu_node_n = self.hu_combined_n[::2]
+        self.h_cell_n = self.h_combined_n[1::2]
+        self.hu_cell_n = self.hu_combined_n[1::2]
+
+        self._step1()
+        # self._step2()
+
+        # print(h_n_total_points.shape)
+        # print(riemann_h.shape)
+        # print(self.h_cell_n.shape)
+        # print(riemann_h.shape, self.h_node_n_plus_1_char.shape)
+        # print(riemann_h)
+        # print(riemann_u)
+        self.h_node_n_plus_1_char = riemann_h[::2]
+        self.hu_node_n_plus_1_char = self.h_node_n_plus_1_char * riemann_u[::2]
+
+        # print(dt, dx, self.h_node_n_plus_1_char)
+        self._step3()
+
+        h_n_plus_1_total_points = np.zeros(self.N_total_points)
+        hu_n_plus_1_total_points = np.zeros(self.N_total_points)
+
+        # Fix border points
+        self.h_cell_n_plus_1[0] = self.h_cell_n[0]
+        self.hu_cell_n_plus_1[0] = self.hu_cell_n[0]
+
+        self.h_cell_n_plus_1[-1] = self.h_cell_n[-1]
+        self.hu_cell_n_plus_1[-1] = self.hu_cell_n[-1]
+
+        # Fix border points
+        self.h_node_n_plus_1_char[0] = self.h_node_n_plus_1_char[1]
+        self.hu_node_n_plus_1_char[0] = self.hu_node_n_plus_1_char[1]
+
+        self.h_node_n_plus_1_char[-1] = self.h_node_n_plus_1_char[-2]
+        self.hu_node_n_plus_1_char[-1] = self.hu_node_n_plus_1_char[-2]
+
+        h_n_plus_1_total_points[1::2] = self.h_cell_n_plus_1
+        hu_n_plus_1_total_points[1::2] = self.hu_cell_n_plus_1
+
+        h_n_plus_1_total_points[::2] = self.h_node_n_plus_1_char
+        hu_n_plus_1_total_points[::2] = self.hu_node_n_plus_1_char
+
+        # print(self.h_node_n)
+        # print(self.h_node_n_plus_1_char)
+
+        return h_n_plus_1_total_points, hu_n_plus_1_total_points
 
 class CabaretSolverNN(CabaretSolver):
     def __init__(self, model, g=9.81):
@@ -687,8 +758,8 @@ class CabaretSolverNN(CabaretSolver):
     def _step2(self):
         self.u = self.hu / self.h
 
-        neg_char_new = self.u - 2 * np.sqrt(self.g * self.h)
-        pos_char_new = self.u + 2 * np.sqrt(self.g * self.h)
+        neg_char_new = self.u - 1 * np.sqrt(self.g * self.h)
+        pos_char_new = self.u + 1 * np.sqrt(self.g * self.h)
 
         for i in range(1, self.h.shape[0] - 3, 2):
             hL = self.h[i]
@@ -706,16 +777,41 @@ class CabaretSolverNN(CabaretSolver):
                 # use classic
                 neg_char_new[i] = 2 * neg_char_new[i + 1] - self.neg_char[i + 2]
                 pos_char_new[i] = 2 * pos_char_new[i - 1] - self.pos_char[i - 2]
+
             else:
                 print('using nn', i)
+                j = i + 1
+
+                I1_node_n = self.pos_char[::2]
+                I2_node_n = self.neg_char[::2]
+
+                I1_cell_n = self.pos_char[1::2]
+                I2_cell_n = self.neg_char[1::2]
+
+                I1_cell_n_plus_half = pos_char_new[1::2]
+                I2_cell_n_plus_half = neg_char_new[1::2]
+
+                j = j // 2
+
+                data = [I1_node_n[j - 1], I1_node_n[j], I1_node_n[j + 1], I2_node_n[j - 1], I2_node_n[j], I2_node_n[j + 1],
+                       I1_cell_n_plus_half[j - 1], I1_cell_n_plus_half[j], I2_cell_n_plus_half[j - 1], I2_cell_n_plus_half[j],
+                       I1_cell_n[j - 1], I1_cell_n[j], I2_cell_n[j - 1], I2_cell_n[j]]
                 #Use nn
                 # fluxx = riemann_solver_nn(self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2], self.model, self.g)
-                fluxx = riemann_solver_newton(self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2])['flux']
-                _, _, hh, uu = fluxx
+                # fluxx = riemann_solver_newton(self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2])['flux']
+                # _, _, hh, uu = fluxx
                 # self.h[i + 1] = hh
                 # self.hu[i + 1] = hh * uu
-                neg_char_new[i + 1] = uu - 2 * np.sqrt(self.g * hh)
-                pos_char_new[i + 1] = uu + 2 * np.sqrt(self.g * hh)
+
+                I1, I2 = nn_solver(data, self.model)
+
+                # neg_char_new[i + 1] = uu - 2 * np.sqrt(self.g * hh)
+                # pos_char_new[i + 1] = uu + 2 * np.sqrt(self.g * hh)
+
+                j = j * 2
+
+                pos_char_new[j] = I1
+                neg_char_new[j] = I2
 
             # print(i, self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2], self.h[i + 1], self.hu[i + 1])
 
@@ -723,7 +819,7 @@ class CabaretSolverNN(CabaretSolver):
 
         for i in range(2, len(self.u) - 1, 2):
             self.u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
-            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 4) ** 2 / self.g
+            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 2) ** 2 / self.g
 
             # self.h[i] = np.clip(self.h[i], a_min=min(self.h[i - 1], self.h[i + 1]), a_max=max(self.h[i - 1], self.h[i + 1]))
 
@@ -784,7 +880,7 @@ class RiemannSolver:
         self.solver_func = solver_func
         # print(self.solver_func)
 
-    def solve(self, x, t, h_l, u_l, h_r, u_r):
+    def solve(self, x, t: float, h_l: float, u_l: float, h_r: float, u_r: float):
         res = riemann_solver_newton(h_l, h_l * u_l, h_r, h_r * u_r)
         h_star, u_star = res['star']
         D_L, D_starL, D_R, D_starR = res['velocity']
