@@ -208,19 +208,32 @@ def riemann_solver_nn(hL, huL, hR, huR, model, g=9.8066):
 
     return flux_i
 
+def _project_I1I2(model, feats):
+    # feats: [B, F] -> returns [B, 2]
+    if feats.ndim == 1:
+        feats = feats.unsqueeze(0)
+    w_out = model(feats)                     # [B, 2F]
+    w = w_out.view(w_out.size(0), 2, 14)     # [B, 2, F]
+    w = torch.softmax(w, dim=-1)             # softmax over features
+    return torch.einsum('bij,bj->bi', w, feats)  # [B, 2]
 
-def nn_solver(data, model):
-    inputs = torch.tensor(data, dtype=torch.float32)
-    I1, I2 = model(inputs.to('cuda')).cpu().detach().numpy()
+def nn_solver(data, model, softmax=False):
+    inputs = torch.tensor(data, dtype=torch.float32).cuda()
+    if softmax:
+        out = _project_I1I2(model, inputs)
+        I1 = out[0, 0]
+        I2 = out[0, 1]
+    else:
+        I1, I2 = model(inputs).cpu().detach().numpy()
 
     return I1, I2
 
 
-class Solver:
+class BaseSolver:
     def __init__(self):
         pass
 
-class GodunovSolver(Solver):
+class GodunovSolver(BaseSolver):
     def __init__(self, solver_func='classic', model=None, g=9.81):
         super().__init__()
         self.g = g
@@ -261,7 +274,7 @@ class GodunovSolver(Solver):
         return h_new, hu_new
 
 
-class CabaretSolver(Solver):
+class CabaretSolver(BaseSolver):
     def __init__(self, solver_func='classic', g=9.81):
         super().__init__()
         self.g = g
@@ -301,8 +314,8 @@ class CabaretSolver(Solver):
         self.u = self.hu / (self.h + 1e-12)
 
         # Инварианты на n-м слое по времени
-        self.neg_char = self.u - 1 * np.sqrt(np.maximum(0, self.g * self.h))
-        self.pos_char = self.u + 1 * np.sqrt(np.maximum(0, self.g * self.h))
+        self.neg_char = self.u - 2 * np.sqrt(np.maximum(0, self.g * self.h))
+        self.pos_char = self.u + 2 * np.sqrt(np.maximum(0, self.g * self.h))
 
         self.h[1::2] -= self.dt / (2 * self.dx) * (self.hu[2::2] - self.hu[:-1:2])
         self.hu[1::2] -= self.dt / (2 * self.dx) * ((self.h[2::2] * (self.u[2::2]) ** 2 + 0.5 * self.g * self.h[2::2] ** 2) - (self.h[:-1:2] * (self.u[:-1:2]) ** 2 + 0.5 * self.g * self.h[:-1:2] ** 2))
@@ -312,8 +325,8 @@ class CabaretSolver(Solver):
         self.u = self.hu / (self.h + 1e-12)
 
         # В четных точках старые инварианты (n слой), в консервативных точках на полуцелом шаге по времени (n + 1/2)
-        neg_char_new = self.u - 1 * np.sqrt(np.maximum(0, self.g * self.h))
-        pos_char_new = self.u + 1 * np.sqrt(np.maximum(0, self.g * self.h))
+        neg_char_new = self.u - 2 * np.sqrt(np.maximum(0, self.g * self.h))
+        pos_char_new = self.u + 2 * np.sqrt(np.maximum(0, self.g * self.h))
 
         for i in range(2, neg_char_new.shape[0] - 1, 2):
             # lambda_left_neg = self.u[i - 1] - (self.g * self.h[i - 1]) ** 0.5
@@ -330,7 +343,7 @@ class CabaretSolver(Solver):
 
         for i in range(2, len(self.u) - 1, 2):
             self.u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
-            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 2) ** 2 / self.g
+            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 4) ** 2 / self.g
             self.hu[i] = self.h[i] * self.u[i]
 
     def _step3(self):
@@ -427,8 +440,8 @@ class CabaretSolverPlus(CabaretSolver):
         u_cell_n_plus_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + 1e-12)
         c_cell_n_plus_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
 
-        I1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
-        I2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
+        I1_cell_n_plus_half = u_cell_n_plus_half + 2 * c_cell_n_plus_half
+        I2_cell_n_plus_half = u_cell_n_plus_half - 2 * c_cell_n_plus_half
 
         lambda1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
         lambda2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
@@ -436,14 +449,14 @@ class CabaretSolverPlus(CabaretSolver):
         u_node_n = self.hu_node_n / (self.h_node_n + 1e-12)
         c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
 
-        I1_node_n = u_node_n + c_node_n
-        I2_node_n = u_node_n - c_node_n
+        I1_node_n = u_node_n + 2 * c_node_n
+        I2_node_n = u_node_n - 2 * c_node_n
 
         u_cell_n = self.hu_cell_n / (self.h_cell_n + 1e-12)
         c_cell_n = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n))
 
-        I1_cell_n = u_cell_n + c_cell_n
-        I2_cell_n = u_cell_n - c_cell_n
+        I1_cell_n = u_cell_n + 2 * c_cell_n
+        I2_cell_n = u_cell_n - 2 * c_cell_n
 
         I1_node_n_plus_1 = np.zeros(self.N_nodes)
         I2_node_n_plus_1 = np.zeros(self.N_nodes)
@@ -506,7 +519,7 @@ class CabaretSolverPlus(CabaretSolver):
 
             # if False:
             if self.model is not None:
-                self.h_node_n_plus_1_char[j] = ((I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / 2) ** 2 / self.g
+                self.h_node_n_plus_1_char[j] = ((I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / 4) ** 2 / self.g
                 u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] + I2_node_n_plus_1[j]) / 2
             else:
                 self.h_node_n_plus_1_char[j] = (I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / (g1_star + g2_star)
@@ -597,21 +610,21 @@ class CabaretSolverPlusPlus(CabaretSolverPlus):
         u_cell_n_plus_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + 1e-12)
         c_cell_n_plus_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
 
-        I1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
-        I2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
+        I1_cell_n_plus_half = u_cell_n_plus_half + 2 * c_cell_n_plus_half
+        I2_cell_n_plus_half = u_cell_n_plus_half - 2 * c_cell_n_plus_half
 
         lambda1_cell_n_plus_half = u_cell_n_plus_half + c_cell_n_plus_half
         lambda2_cell_n_plus_half = u_cell_n_plus_half - c_cell_n_plus_half
 
         u_node_n = self.hu_node_n / (self.h_node_n + 1e-12)
         c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
-        I1_node_n = u_node_n + c_node_n
-        I2_node_n = u_node_n - c_node_n
+        I1_node_n = u_node_n + 2 * c_node_n
+        I2_node_n = u_node_n - 2 * c_node_n
 
         u_cell_n = self.hu_cell_n / (self.h_cell_n + 1e-12)
         c_cell_n = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n))
-        I1_cell_n = u_cell_n + c_cell_n
-        I2_cell_n = u_cell_n - c_cell_n
+        I1_cell_n = u_cell_n + 2 * c_cell_n
+        I2_cell_n = u_cell_n - 2 * c_cell_n
 
         I1_node_n_plus_1 = np.zeros(self.N_nodes)
         I2_node_n_plus_1 = np.zeros(self.N_nodes)
@@ -677,7 +690,7 @@ class CabaretSolverPlusPlus(CabaretSolverPlus):
             g2_star = self.g / (c_cell_n_plus_half[relevant_cell_idx_I2] + 1e-12)
 
             self.h_node_n_plus_1_char[j] = (I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / (g1_star + g2_star)
-            u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] * g2_star + I2_node_n_plus_1[j] * g1_star) / (g1_star + g2_star)
+            u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] * g2_star + I2_node_n_plus_1[j] * g1_star) / (g1_star + g2_star) / 2        # ?
 
             self.h_node_n_plus_1_char[j] = np.maximum(0.0, self.h_node_n_plus_1_char[j])
             self.hu_node_n_plus_1_char[j] = self.h_node_n_plus_1_char[j] * u_node_n_plus_1_at_j
@@ -750,16 +763,17 @@ class CabaretSolverGT(CabaretSolverPlus):
         return h_n_plus_1_total_points, hu_n_plus_1_total_points
 
 class CabaretSolverNN(CabaretSolver):
-    def __init__(self, model, g=9.81):
+    def __init__(self, model, g=9.81, softmax=False):
         super().__init__(g=g)
 
         self.model = model
+        self.softmax = softmax
 
     def _step2(self):
         self.u = self.hu / self.h
 
-        neg_char_new = self.u - 1 * np.sqrt(self.g * self.h)
-        pos_char_new = self.u + 1 * np.sqrt(self.g * self.h)
+        neg_char_new = self.u - 2 * np.sqrt(self.g * self.h)
+        pos_char_new = self.u + 2 * np.sqrt(self.g * self.h)
 
         for i in range(1, self.h.shape[0] - 3, 2):
             hL = self.h[i]
@@ -803,7 +817,7 @@ class CabaretSolverNN(CabaretSolver):
                 # self.h[i + 1] = hh
                 # self.hu[i + 1] = hh * uu
 
-                I1, I2 = nn_solver(data, self.model)
+                I1, I2 = nn_solver(data, self.model, self.softmax)
 
                 # neg_char_new[i + 1] = uu - 2 * np.sqrt(self.g * hh)
                 # pos_char_new[i + 1] = uu + 2 * np.sqrt(self.g * hh)
@@ -819,7 +833,7 @@ class CabaretSolverNN(CabaretSolver):
 
         for i in range(2, len(self.u) - 1, 2):
             self.u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
-            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 2) ** 2 / self.g
+            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 4) ** 2 / self.g
 
             # self.h[i] = np.clip(self.h[i], a_min=min(self.h[i - 1], self.h[i + 1]), a_max=max(self.h[i - 1], self.h[i + 1]))
 

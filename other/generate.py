@@ -55,7 +55,8 @@ def generate_balanced_training_data(riemann_solver_newton, num_samples_per_categ
         (1, 2): 4,
         (2, 0): 5,
         (2, 1): 6,
-        (2, 2): 7
+        (2, 2): 7,
+        (1, 1): 8
     }
 
     # Storage for samples, one list per category

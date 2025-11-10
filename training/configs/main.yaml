@@ -1,0 +1,20 @@
+defaults:
+  - _self_
+  - optimizer: adam
+  - module: base
+
+_target_: trainer.Trainer
+_partial_: True
+
+num_pseudo_epochs: 100
+steps_per_epoch: 1000
+validation_frequency_epochs: 5
+ckpt_frequency_epochs: 10
+train_table: datasets/new_riemann.csv
+val_table: datasets/new_riemann.csv
+batch_size: 32
+feature_cols: 14
+target_cols: 2
+
+optimizer:
+  _partial_: True

@@ -13,6 +13,8 @@ class MLP(nn.Module):
         weights: bool = False,
     ):
         super(MLP, self).__init__()
+        self.weights = weights
+
         self.in_proj = nn.Linear(input_features, dim)
 
         self.layers = nn.ModuleList(
@@ -24,9 +26,11 @@ class MLP(nn.Module):
         else:
             self.out_proj = nn.Linear(dim, 2)
 
-        self.activation = elu
+        self.activation = get_activation(activation)
 
-    def forward(self, x):
+    def forward(self, data):
+        x = data["feats"]
+
         x = self.activation(self.in_proj(x))
 
         for layer in self.layers:
@@ -34,8 +38,29 @@ class MLP(nn.Module):
 
         x = self.out_proj(x)
 
-        return x
+        out_dict = {"preds": x}
 
+        return out_dict
+
+    def loss(self, pred, data):
+        pred_invs = pred["preds"]
+        target_invs = data["targets"]
+
+        mse_loss = nn.functional.mse_loss(pred_invs, target_invs)
+
+        return {"mse_loss": mse_loss}
+
+
+
+def get_activation(activation: str) -> nn.Module:
+    if activation == "relu":
+        return nn.ReLU()
+    elif activation == "elu":
+        return nn.ELU()
+    elif activation == "gelu":
+        return nn.GELU()
+    else:
+        raise NotImplementedError
 
 def load_nn(path=None, input_features=4, n_feats=20):
     model = MLP(input_features=input_features, dim=n_feats)

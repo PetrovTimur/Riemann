@@ -1,0 +1,3 @@
+_target_: models.MLP
+input_features: 14
+dim: 20

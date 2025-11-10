@@ -1,0 +1,3 @@
+_target_: solvers.CabaretSolver
+solver_func: classic
+g: 9.81

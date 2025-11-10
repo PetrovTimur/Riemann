@@ -1,6 +1,6 @@
 import numpy as np
-from solvers import GodunovSolver, CabaretSolver
-from models import load_nn
+from training.solvers import CabaretSolver
+from training.models import load_nn
 
 def compute(h, hu, solver, dx, t_end):
     # print(h, hu)

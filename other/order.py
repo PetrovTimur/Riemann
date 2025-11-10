@@ -1,24 +1,24 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from solvers import RiemannSolver, CabaretSolver, GodunovSolver
-from simulate import run_simulation, initial_conditions, error_norm
+from training.solvers import RiemannSolver
+from simulate import run_simulation, error_norm
 
 def plot():
     solver = RiemannSolver()
-    n = 8
+    n = 80
     L = 10
     x = np.linspace(-L, L, 2 * n + 1, endpoint=True)
     t = 2
 
-    # h_l = 1
-    # h_r = 0.206612
-    # u_l = 0
-    # u_r = 3.416828
-
     h_l = 1
-    h_r = 1
-    u_l = -0.1
-    u_r = 0.1
+    h_r = 0.206612
+    u_l = 0
+    u_r = 3.416828
+
+    # h_l = 1
+    # h_r = 1
+    # u_l = -0.1
+    # u_r = 0.1
 
     res = solver.solve(x, t, h_l, u_l, h_r, u_r)
     h_vals, u_vals = res['vals']
@@ -63,7 +63,7 @@ def plot():
     solvers = ['classic', 'classic_improved', 'generic_nn', 'selective_nn']
 
     for nx in resolutions:
-        result = run_simulation(2 * L, nx, h_l, u_l, h_r, u_r, solver=solvers[0], t_end=t)
+        result = run_simulation(2 * L, nx, h_l, u_l, h_r, u_r, solver=solvers[2], t_end=t)
         h_results.append(result[0])
         u_results.append(result[1] / result[0])
         # print(h_results[-1].shape, np.all(h_results[-1] == h_results[-1][::-1]))

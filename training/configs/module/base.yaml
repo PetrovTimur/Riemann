@@ -1,0 +1,7 @@
+# Module config composing its own model & solver
+defaults:
+  - model: mlp
+  - solver: godunov_newton
+  - _self_
+
+_target_: module.BaseModule

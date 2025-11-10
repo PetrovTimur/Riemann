@@ -1,0 +1,5 @@
+_target_: solvers.GodunovSolver
+solver_func: newton
+g: 9.81
+model: null
+

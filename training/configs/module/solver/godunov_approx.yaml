@@ -1,0 +1,5 @@
+_target_: solvers.GodunovSolver
+solver_func: approx
+g: 9.81
+model: null
+
