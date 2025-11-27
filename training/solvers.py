@@ -224,7 +224,7 @@ def nn_solver(data, model, softmax=False):
         I1 = out[0, 0]
         I2 = out[0, 1]
     else:
-        I1, I2 = model(inputs).cpu().detach().numpy()
+        I1, I2 = model.generate(inputs).cpu().detach().numpy()
 
     return I1, I2
 
@@ -517,8 +517,8 @@ class CabaretSolverPlus(CabaretSolver):
                 I1_node_n_plus_1[j] = I1
                 I2_node_n_plus_1[j] = I2
 
-            # if False:
-            if self.model is not None:
+            if True:
+            # if self.model is not None:
                 self.h_node_n_plus_1_char[j] = ((I1_node_n_plus_1[j] - I2_node_n_plus_1[j]) / 4) ** 2 / self.g
                 u_node_n_plus_1_at_j = (I1_node_n_plus_1[j] + I2_node_n_plus_1[j]) / 2
             else:
@@ -793,7 +793,7 @@ class CabaretSolverNN(CabaretSolver):
                 pos_char_new[i] = 2 * pos_char_new[i - 1] - self.pos_char[i - 2]
 
             else:
-                print('using nn', i)
+                # print('using nn', i)
                 j = i + 1
 
                 I1_node_n = self.pos_char[::2]

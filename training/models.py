@@ -30,6 +30,7 @@ class MLP(nn.Module):
 
     def forward(self, data):
         x = data["feats"]
+        in_x = x.clone()
 
         x = self.activation(self.in_proj(x))
 
@@ -38,9 +39,34 @@ class MLP(nn.Module):
 
         x = self.out_proj(x)
 
+        if self.weights:
+            w_out = x
+            w = w_out.view(w_out.size(0), 2, 14)  # [B, 2, F]
+            w = torch.softmax(w, dim=-1)  # softmax over features
+            x = torch.einsum('bij,bj->bi', w, in_x)  # [B, 2]
+
         out_dict = {"preds": x}
 
         return out_dict
+    
+    def generate(self, x):
+        in_x = x.clone()
+        x = self.activation(self.in_proj(x))
+
+        for layer in self.layers:
+            x = self.activation(layer(x))
+
+        x = self.out_proj(x)
+
+        if self.weights:
+            if in_x.ndim == 1:
+                in_x = in_x.unsqueeze(0)
+            w_out = x
+            w = w_out.view(w_out.size(0), 2, 14)  # [B, 2, F]
+            w = torch.softmax(w, dim=-1)  # softmax over features
+            x = torch.einsum('bij,bj->bi', w, in_x)  # [B, 2]
+
+        return x
 
     def loss(self, pred, data):
         pred_invs = pred["preds"]

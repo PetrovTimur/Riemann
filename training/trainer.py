@@ -5,6 +5,7 @@ from typing import List, Callable, Iterable, Optional
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from hydra.core.hydra_config import HydraConfig
 from module import BaseModule
@@ -105,6 +106,11 @@ class Trainer:
         if self.checkpoint_path:
             self._load_checkpoint(self.checkpoint_path)
 
+        log_dir = os.path.join(self.checkpoint_dir, "logs")
+        self.writer = SummaryWriter(log_dir)
+
+        self.module.solver.model.to(self.device)
+
     def _checkpoint_payload(self) -> dict:
         cfg_container = None
         if isinstance(self.config, DictConfig):
@@ -134,6 +140,7 @@ class Trainer:
             self._train_epoch(pseudo_epoch)
             if self._is_validation_epoch(pseudo_epoch):
                 self._val_epoch(pseudo_epoch)
+                self.visualize(pseudo_epoch)
             if self._is_checkpoint_epoch(pseudo_epoch):
                 self._save_checkpoint(pseudo_epoch)
 
@@ -145,50 +152,68 @@ class Trainer:
             features = features.to(self.device)
             targets = targets.to(self.device)
             data = {"feats": features, "targets": targets}
+
             preds = self.module(data)
             loss = self.module.loss(preds, data)
+
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+
             total_loss += float(loss.item())
             step += 1
             if step >= self.steps_per_epoch:
                 break
-        avg = total_loss / max(step, 1)
+
+        avg = total_loss / max(step * self.batch_size, 1)
+
+        self.writer.add_scalar("train_loss", avg, epoch)
         print(f"Epoch {epoch} train steps={step} loss={avg:.4f}")
 
-    def _val_epoch(self, epoch: int):
+    def _val_epoch(self, epoch: int) -> dict:
+        """Run validation for a single epoch and return metrics.
+        Visualization is handled separately via visualize_epoch().
+        """
         self.module.eval()
         total_loss = 0.0
         step = 0
+
+        self.module.solver.model.load_state_dict(self.module.model.state_dict())
+
         with torch.no_grad():
             for features, targets in self.val_loader:
                 features = features.to(self.device)
                 targets = targets.to(self.device)
                 data = {"feats": features, "targets": targets}
+
                 preds = self.module(data)
                 loss = self.module.loss(preds, data)
                 total_loss += float(loss.item())
+
                 step += 1
+
+            metrics = self.module.metrics()
+
         avg = total_loss / max(step, 1)
-        print(f"Epoch {epoch} val steps={step} loss={avg:.4f}")
+
+        # log scalar only; visualization is separate
+        self.writer.add_scalar("val_loss", avg, epoch)
+        print(f"Epoch {epoch} val steps={step} loss={avg:.4f} metrics={metrics}")
+
+        return {"val_loss": avg, "val_steps": step, **({} if metrics is None else metrics)}
+
+    def visualize(self, epoch: int):
+        """Log images to tensorboard for the given epoch using module.visualize()."""
+        image_dict = self.module.visualize()
+        for key, image in image_dict.items():
+            self.writer.add_image(key, image, epoch, dataformats="HWC")
 
     def eval(self) -> dict:
-        self.module.eval()
-        total_loss = 0.0
-        total_steps = 0
-        with torch.no_grad():
-            for features, targets in self.val_loader:
-                features = features.to(self.device)
-                targets = targets.to(self.device)
-                data = {"feats": features, "targets": targets}
-                preds = self.module(data)
-                loss = self.module.loss(preds, data)
-                total_loss += float(loss.item())
-                total_steps += 1
-        avg_loss = total_loss / max(total_steps, 1)
-        metrics = {"val_loss": avg_loss, "val_steps": total_steps}
-        print(f"[Trainer] Eval full validation set steps={total_steps} loss={avg_loss:.4f}")
+        """Evaluate using the same logic as val_epoch without duplicating code."""
+        metrics = self._val_epoch(epoch=self.num_pseudo_epochs)
+        print(
+            f"[Trainer] Eval full validation set steps={metrics['val_steps']} loss={metrics['val_loss']:.4f}"
+        )
         return metrics
 
     def _is_validation_epoch(self, epoch: int):

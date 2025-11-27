@@ -1,0 +1,5 @@
+_target_: solvers.CabaretSolverNN
+model: ${..model}
+softmax: False
+
+# __partial__: True

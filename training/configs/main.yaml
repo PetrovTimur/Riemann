@@ -6,12 +6,12 @@ defaults:
 _target_: trainer.Trainer
 _partial_: True
 
-num_pseudo_epochs: 100
+num_pseudo_epochs: 50
 steps_per_epoch: 1000
 validation_frequency_epochs: 5
 ckpt_frequency_epochs: 10
-train_table: datasets/new_riemann.csv
-val_table: datasets/new_riemann.csv
+train_table: datasets/riemann_invariants_only_train.csv
+val_table: datasets/riemann_invariants_only_val.csv
 batch_size: 32
 feature_cols: 14
 target_cols: 2

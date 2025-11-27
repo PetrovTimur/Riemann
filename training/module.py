@@ -1,8 +1,13 @@
 import torch
 from torch import nn
 
-from solvers import BaseSolver
+import numpy as np
+import matplotlib.pyplot as plt
 
+from solvers import BaseSolver
+from simulation import Simulation, plot_comparison
+
+from metrics.toro import toro_tests
 
 class BaseModule(nn.Module):
     def __init__(
@@ -38,6 +43,44 @@ class BaseModule(nn.Module):
             total_loss += v.mean()
 
         return total_loss
+    
+    def metrics(self):
+        
+        # For now just run closed-loop
+
+        config = toro_tests[0]
+
+        config["solver"] = self.solver
+        sim = Simulation(config)
+        sim.run()
+
+        return {}
+    
+    def visualize(self):
+        image_dict = {}
+
+        for i, test in enumerate(toro_tests):
+            config = toro_tests[i]
+            config["solver"] = self.solver
+            sim = Simulation(config)
+            sim.run()
+
+            fig = plot_comparison([sim], plot_solution=True)
+            fig.canvas.draw()
+
+            w, h = fig.canvas.get_width_height()
+            data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            img = data.reshape(h, w, 3)
+
+            image_dict.update(
+                {
+                    f"tests/toro_{i}": img,
+                }
+            )
+
+            plt.close(fig)
+
+        return image_dict
 
     def step(self, h, hu, dx, dt):
         """Optional helper to call solver one step if available.

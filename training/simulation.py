@@ -2,14 +2,17 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from training.solvers import (
+from solvers import (
     CabaretSolver,
     GodunovSolver,
     CabaretSolverNN,
     RiemannSolver,
-    CabaretSolverGT
+    CabaretSolverGT,
+    CabaretSolverPlus,
+    CabaretSolverPlusPlus,
+    BaseSolver
 )
-from training.models import load_nn
+from models import load_nn
 
 
 class Simulation:
@@ -23,7 +26,7 @@ class Simulation:
         self.t_end = config['t_end']
         self.dx = 2 * self.L / self.nx
         # print(self.dx)
-        self.solver = config['solver']
+        self.solver: BaseSolver = config['solver']
 
         if 'h' in config and 'u' in config and config['h'] is not None and config['u'] is not None:
             self.h = config['h']
@@ -270,20 +273,29 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
         axes[1].legend()
 
     plt.tight_layout()
-    plt.show()
+    # plt.show()
+
+    return fig
 
 if __name__ == '__main__':
     # model1 = load_nn(path='checkpoints/model_new_5.pt', input_features=14, n_feats=40)
     # model2 = load_nn(path='checkpoints/model_pairs_2.pt', input_features=14, n_feats=40)
 
     config = {
-        'L': 25,
+        'L': 50,
         'nx': 100,
 
-        'h_l': 1.0,
-        'h_r': 0.206612,
-        'u_l': 0,
-        'u_r': 3.416828,
+        # 'h_l': 1.0,
+        # 'h_r': 0.206612,
+        # 'u_l': 0,
+        # 'u_r': 3.416828,
+
+        # (8.85582160949707, 7.05979061126709, 1.3162227869033813, 8.295522689819336
+
+         'h_l': 8.85582160949707,
+         'h_r': 1.3162227869033813,
+         'u_l': 0.7971920531569991,
+         'u_r': 6.302521710124653,
 
         # 'h_l': 1.0,
         # 'h_r': 1.0,
@@ -321,34 +333,34 @@ if __name__ == '__main__':
 
         # print(h, u)
 
-    config['solver'] = CabaretSolverGT()
+    config['solver'] = CabaretSolver()
     sim1 = Simulation(config)
     sim1.run()
     # sim.plot()
-    # sim1.plot_animation()
+    sim1.plot_animation()
 
     config['solver'] = GodunovSolver(solver_func='newton', model=None)
     sim2 = Simulation(config)
     sim2.run()
-    # sim2.plot_animation()
+    sim2.plot_animation()
 
 
-    # config['solver'] = CabaretSolverPlus(model=model1)
-    # # config['t_end'] = 0.2
-    # sim3 = Simulation(config)
-    # sim3.run()
-    # # sim3.plot_animation()
+    config['solver'] = CabaretSolverPlus(model=None)
+    # config['t_end'] = 0.2
+    sim3 = Simulation(config)
+    sim3.run()
+    sim3.plot_animation()
     # # sim3.plot()
 
     # print(torch.load('checkpoints/model_pairs_5.pt'))
 
-    model = load_nn(path='checkpoints/model_pairs_5.pt', input_features=14, n_feats=40)
-    config['solver'] = CabaretSolverNN(model, softmax=True)
-    sim4 = Simulation(config)
-    sim4.run()
-    sim4.plot_animation()
+    # model = load_nn(path='checkpoints/model_pairs_5.pt', input_features=14, n_feats=40)
+    # config['solver'] = CabaretSolverNN(model, softmax=True)
+    # sim4 = Simulation(config)
+    # sim4.run()
+    # sim4.plot_animation()
 
     # plot_comparison([sim1, sim2], labels=['Cabaret', 'Godunov'], plot_solution=True)
     # plot_comparison([sim1, sim2, sim3, sim4], labels=['CabaretNN', 'Godunov', 'Cabaret+', 'CabaretClassic'], plot_solution=True, plot_u=True)
-    plot_comparison([sim1, sim2, sim4], labels=['CabaretGT', 'Godunov', 'CabaretNN'], plot_solution=True)
-
+    fig = plot_comparison([sim1, sim2, sim3], labels=['Cabaret', 'Godunov', 'CabaretPlus'], plot_solution=True)
+    plt.show()
