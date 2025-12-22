@@ -18,6 +18,7 @@ class CSVDataset(Dataset):
       - target_cols: int T (number of columns immediately following features to use as targets)
     Features are columns [0..F-1]; Targets are columns [F..F+T-1].
     """
+
     def __init__(
         self,
         path: str,
@@ -25,7 +26,7 @@ class CSVDataset(Dataset):
         target_cols: int,
     ):
         self.path = path
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             reader = csv.DictReader(f)
             if not reader.fieldnames:
                 raise ValueError(f"CSV has no header: {path}")
@@ -42,7 +43,9 @@ class CSVDataset(Dataset):
         if T <= 0:
             raise ValueError("target_cols must be > 0")
         if F + T > ncols:
-            raise ValueError(f"feature_cols + target_cols exceeds number of columns: F={F} T={T} ncols={ncols}")
+            raise ValueError(
+                f"feature_cols + target_cols exceeds number of columns: F={F} T={T} ncols={ncols}"
+            )
 
         self.feature_count = F
         self.target_count = T
@@ -76,7 +79,7 @@ class Trainer:
         batch_size: int,
         validation_frequency_epochs: int,
         ckpt_frequency_epochs: int,
-        checkpoint_path: Optional[str] = None
+        checkpoint_path: Optional[str] = None,
     ):
         self.module = module
         self.num_pseudo_epochs = num_pseudo_epochs
@@ -91,13 +94,23 @@ class Trainer:
         self.checkpoint_path = checkpoint_path
         self.ckpt_frequency_epochs = ckpt_frequency_epochs
 
-        self.device = next(self.module.parameters()).device if any(p.requires_grad for p in self.module.parameters()) else torch.device('cpu')
+        self.device = (
+            next(self.module.parameters()).device
+            if any(p.requires_grad for p in self.module.parameters())
+            else torch.device("cpu")
+        )
 
         # datasets & loaders (now using required integer cutoffs)
-        self.train_ds = CSVDataset(self.train_table, self.feature_cols, self.target_cols)
+        self.train_ds = CSVDataset(
+            self.train_table, self.feature_cols, self.target_cols
+        )
         self.val_ds = CSVDataset(self.val_table, self.feature_cols, self.target_cols)
-        self.train_loader = DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True)
-        self.val_loader = DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False)
+        self.train_loader = DataLoader(
+            self.train_ds, batch_size=self.batch_size, shuffle=True
+        )
+        self.val_loader = DataLoader(
+            self.val_ds, batch_size=self.batch_size, shuffle=False
+        )
 
         self.optimizer = optimizer(self.module.parameters())
 
@@ -126,12 +139,16 @@ class Trainer:
         print(f"[Trainer] Saved checkpoint: {path}")
 
     def _load_checkpoint(self, path: str):
-        abs_path = path if os.path.isabs(path) else os.path.join(self.checkpoint_dir, path)
+        abs_path = (
+            path if os.path.isabs(path) else os.path.join(self.checkpoint_dir, path)
+        )
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Checkpoint not found: {abs_path}")
         ckpt_obj = torch.load(abs_path, map_location=self.device)
         if not isinstance(ckpt_obj, dict) or "state_dict" not in ckpt_obj:
-            raise ValueError("Unsupported checkpoint format. Expected dict with keys: 'config' and 'state_dict'")
+            raise ValueError(
+                "Unsupported checkpoint format. Expected dict with keys: 'config' and 'state_dict'"
+            )
         self.module.load_state_dict(ckpt_obj["state_dict"], strict=False)
         print(f"[Trainer] Loaded module state_dict from {abs_path}")
 
@@ -155,6 +172,7 @@ class Trainer:
 
             preds = self.module(data)
             loss = self.module.loss(preds, data)
+            # print(loss, loss.shape)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -165,7 +183,7 @@ class Trainer:
             if step >= self.steps_per_epoch:
                 break
 
-        avg = total_loss / max(step * self.batch_size, 1)
+        avg = total_loss / max(step, 1)
 
         self.writer.add_scalar("train_loss", avg, epoch)
         print(f"Epoch {epoch} train steps={step} loss={avg:.4f}")
@@ -200,7 +218,11 @@ class Trainer:
         self.writer.add_scalar("val_loss", avg, epoch)
         print(f"Epoch {epoch} val steps={step} loss={avg:.4f} metrics={metrics}")
 
-        return {"val_loss": avg, "val_steps": step, **({} if metrics is None else metrics)}
+        return {
+            "val_loss": avg,
+            "val_steps": step,
+            **({} if metrics is None else metrics),
+        }
 
     def visualize(self, epoch: int):
         """Log images to tensorboard for the given epoch using module.visualize()."""

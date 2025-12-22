@@ -9,6 +9,7 @@ from simulation import Simulation, plot_comparison
 
 from metrics.toro import toro_tests
 
+
 class BaseModule(nn.Module):
     def __init__(
         self,
@@ -22,7 +23,7 @@ class BaseModule(nn.Module):
         self.model = model
 
         # resolve device
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
 
         self.model.to(self.device)
@@ -43,9 +44,8 @@ class BaseModule(nn.Module):
             total_loss += v.mean()
 
         return total_loss
-    
+
     def metrics(self):
-        
         # For now just run closed-loop
 
         config = toro_tests[0]
@@ -55,7 +55,7 @@ class BaseModule(nn.Module):
         sim.run()
 
         return {}
-    
+
     def visualize(self):
         image_dict = {}
 
@@ -65,7 +65,11 @@ class BaseModule(nn.Module):
             sim = Simulation(config)
             sim.run()
 
-            fig = plot_comparison([sim], plot_solution=True)
+            try:
+                fig = plot_comparison([sim], plot_solution=True)
+            except:
+                continue
+
             fig.canvas.draw()
 
             w, h = fig.canvas.get_width_height()
@@ -81,18 +85,3 @@ class BaseModule(nn.Module):
             plt.close(fig)
 
         return image_dict
-
-    def step(self, h, hu, dx, dt):
-        """Optional helper to call solver one step if available.
-        h, hu: numpy arrays (or tensors convertible to numpy) of shape [N]
-        Returns updated (h_new, hu_new) or raises if solver missing.
-        """
-
-        # Accept torch tensors too
-        if isinstance(h, torch.Tensor):
-            h = h.detach().cpu().numpy()
-        if isinstance(hu, torch.Tensor):
-            hu = hu.detach().cpu().numpy()
-        h_new, hu_new = self.solver.step(h, hu, dx, dt)
-        return h_new, hu_new
-
