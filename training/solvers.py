@@ -208,23 +208,9 @@ def riemann_solver_nn(hL, huL, hR, huR, model, g=9.8066):
 
     return flux_i
 
-def _project_I1I2(model, feats):
-    # feats: [B, F] -> returns [B, 2]
-    if feats.ndim == 1:
-        feats = feats.unsqueeze(0)
-    w_out = model(feats)                     # [B, 2F]
-    w = w_out.view(w_out.size(0), 2, 14)     # [B, 2, F]
-    w = torch.softmax(w, dim=-1)             # softmax over features
-    return torch.einsum('bij,bj->bi', w, feats)  # [B, 2]
-
-def nn_solver(data, model, softmax=False):
+def nn_solver(data, model):
     inputs = torch.tensor(data, dtype=torch.float32).cuda()
-    if softmax:
-        out = _project_I1I2(model, inputs)
-        I1 = out[0, 0]
-        I2 = out[0, 1]
-    else:
-        I1, I2 = model.generate(inputs).cpu().detach().numpy()
+    I1, I2 = model.generate(inputs.unsqueeze(0)).squeeze(0).cpu().detach().numpy()
 
     return I1, I2
 
@@ -322,7 +308,7 @@ class CabaretSolver(BaseSolver):
         # print(self.h)
 
     def _step2(self):
-        self.u = self.hu / (self.h + 1e-12)
+        self.u = self.hu / (self.h + 1e-12)     # TODO
 
         # В четных точках старые инварианты (n слой), в консервативных точках на полуцелом шаге по времени (n + 1/2)
         neg_char_new = self.u - 2 * np.sqrt(np.maximum(0, self.g * self.h))
@@ -807,17 +793,62 @@ class CabaretSolverNN(CabaretSolver):
 
                 j = j // 2
 
-                data = [I1_node_n[j - 1], I1_node_n[j], I1_node_n[j + 1], I2_node_n[j - 1], I2_node_n[j], I2_node_n[j + 1],
-                       I1_cell_n_plus_half[j - 1], I1_cell_n_plus_half[j], I2_cell_n_plus_half[j - 1], I2_cell_n_plus_half[j],
-                       I1_cell_n[j - 1], I1_cell_n[j], I2_cell_n[j - 1], I2_cell_n[j]]
-                #Use nn
-                # fluxx = riemann_solver_nn(self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2], self.model, self.g)
-                # fluxx = riemann_solver_newton(self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2])['flux']
-                # _, _, hh, uu = fluxx
-                # self.h[i + 1] = hh
-                # self.hu[i + 1] = hh * uu
+                data = [I1_node_n[j - 1], I1_node_n[j], I1_node_n[j + 1],
+                        I2_node_n[j - 1], I2_node_n[j], I2_node_n[j + 1],
+                        I1_cell_n_plus_half[j - 1], I1_cell_n_plus_half[j],
+                        I2_cell_n_plus_half[j - 1], I2_cell_n_plus_half[j],
+                        I1_cell_n[j - 1], I1_cell_n[j], I2_cell_n[j - 1], I2_cell_n[j]]
 
-                I1, I2 = nn_solver(data, self.model, self.softmax)
+                if ((uR < -cR) and (uL < cL)) or ((uL < -cL) and (uR < cR)):
+                    u_cell_n_plus_half = (I1_cell_n_plus_half + I2_cell_n_plus_half) / 2
+                    h_cell_n_plus_half = ((I1_cell_n_plus_half - I2_cell_n_plus_half) / 4) ** 2 / self.g
+
+                    u_node_n = (I1_node_n + I2_node_n) / 2
+                    h_node_n = ((I1_node_n - I2_node_n) / 4) ** 2 / self.g
+
+                    u_cell_n = (I1_cell_n + I2_cell_n) / 2
+                    h_cell_n = ((I1_cell_n - I2_cell_n) / 4) ** 2 / self.g
+
+                    # Flip heights and velocity sign
+                    h_cell_n[j - 1], h_cell_n[j] = h_cell_n[j], h_cell_n[j - 1]
+                    u_cell_n[j - 1], u_cell_n[j] = u_cell_n[j], u_cell_n[j - 1]
+                    u_cell_n *= -1
+
+                    h_node_n[j - 1], h_node_n[j + 1] = h_node_n[j + 1], h_node_n[j - 1]
+                    u_node_n[j - 1], u_node_n[j + 1] = u_node_n[j + 1], u_node_n[j - 1]
+                    u_node_n *= -1
+
+                    h_cell_n_plus_half[j - 1], h_cell_n_plus_half[j] = h_cell_n_plus_half[j], h_cell_n_plus_half[j - 1]
+                    u_cell_n_plus_half[j - 1], u_cell_n_plus_half[j] = u_cell_n_plus_half[j], u_cell_n_plus_half[j - 1]
+                    u_cell_n_plus_half *= -1
+
+                    # New invariants
+                    I1_node_n_flipped = u_node_n + 2 * np.sqrt(self.g * h_node_n)
+                    I2_node_n_flipped = u_node_n - 2 * np.sqrt(self.g * h_node_n)
+
+                    I1_cell_n_plus_half_flipped = u_cell_n_plus_half + 2 * np.sqrt(self.g * h_cell_n_plus_half)
+                    I2_cell_n_plus_half_flipped = u_cell_n_plus_half - 2 * np.sqrt(self.g * h_cell_n_plus_half)
+
+                    I1_cell_n_flipped = u_cell_n + 2 * np.sqrt(self.g * h_cell_n)
+                    I2_cell_n_flipped = u_cell_n - 2 * np.sqrt(self.g * h_cell_n)
+
+                    data = [I1_node_n_flipped[j - 1], I1_node_n_flipped[j], I1_node_n_flipped[j + 1],
+                        I2_node_n_flipped[j - 1], I2_node_n_flipped[j], I2_node_n_flipped[j + 1],
+                        I1_cell_n_plus_half_flipped[j - 1], I1_cell_n_plus_half_flipped[j],
+                        I2_cell_n_plus_half_flipped[j - 1], I2_cell_n_plus_half_flipped[j],
+                        I1_cell_n_flipped[j - 1], I1_cell_n_flipped[j], I2_cell_n_flipped[j - 1], I2_cell_n_flipped[j]]
+
+                I1, I2 = nn_solver(data, self.model)
+
+                if ((uR < -cR) and (uL < cL)) or ((uL < -cL) and (uR < cR)):
+                    u_new = (I1 + I2) / 2
+                    h_new = ((I1 - I2) / 4) ** 2 / self.g
+
+                    u_new *= -1
+
+                    I1 = u_new + 2 * np.sqrt(self.g * h_new)
+                    I2 = u_new - 2 * np.sqrt(self.g * h_new)
+
 
                 # neg_char_new[i + 1] = uu - 2 * np.sqrt(self.g * hh)
                 # pos_char_new[i + 1] = uu + 2 * np.sqrt(self.g * hh)
