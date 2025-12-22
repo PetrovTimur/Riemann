@@ -112,6 +112,7 @@ class Simulation:
         hu = self.hu.copy()
         self.h_rollout = [h.copy()]
         self.hu_rollout = [hu.copy()]
+        k = 0
         while self.t < self.t_end:
             # print(t)
             # u = np.where(h > 0, hu / h, 0)
@@ -141,6 +142,12 @@ class Simulation:
             self.t += dt
             self.h_rollout.append(h.copy())
             self.hu_rollout.append(hu.copy())
+
+            k += 1
+
+
+            if k > 1000:
+                raise TimeoutError
         self.h_final = h
         self.hu_final = hu
         return h, hu
@@ -207,7 +214,7 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
     n = len(sims)
     if labels is None:
         labels = [f'Solver {i+1}' for i in range(n)]
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12))
 
     # h comparison
     for sim, label in zip(sims, labels):
@@ -242,6 +249,28 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
     axes[1].legend()
     axes[1].grid(True)
 
+    # Riemann invariants comparison: w± = u ± 2*sqrt(g*h)
+    g = 9.81
+    for sim, label in zip(sims, labels):
+        if isinstance(sim.solver, CabaretSolver):
+            x_plot = sim.x[1::2]
+            h_plot = sim.h_final[1::2]
+            hu_plot = sim.hu_final[1::2]
+        else:
+            x_plot = sim.x
+            h_plot = sim.h_final
+            hu_plot = sim.hu_final
+        u_plot = np.where(h_plot > 1e-12, hu_plot / h_plot, 0.0)
+        root_h = np.sqrt(np.maximum(h_plot, 0.0))
+        w_plus = u_plot + g ** 0.5 * root_h
+        w_minus = u_plot - g ** 0.5 * root_h
+        axes[2].plot(x_plot, w_plus, label=f'u + gh')
+        axes[2].plot(x_plot, w_minus, label=f'u - gh')
+        axes[2].plot(x_plot, u_plot, label=f'u')
+    axes[2].set_title('Lambda')
+    axes[2].legend()
+    axes[2].grid(True)
+
     # Add Riemann solution if requested
     if plot_solution:
         sim0 = sims[0]
@@ -269,8 +298,15 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
             axes[1].plot(x_riem, u_riem, label='True', linestyle=':', color='k')
         else:
             axes[1].plot(x_riem, hu_riem, label='True', linestyle=':', color='k')
+        # Invariants for Riemann solution
+        # root_h_riem = np.sqrt(np.maximum(h_riem, 0.0))
+        # w_plus_riem = u_riem + 2.0 * g * root_h_riem
+        # w_minus_riem = u_riem - 2.0 * g * root_h_riem
+        # axes[2].plot(x_riem, w_plus_riem, label='True (+)', linestyle=':', color='k')
+        # axes[2].plot(x_riem, w_minus_riem, label='True (-)', linestyle=':', color='k')
         axes[0].legend()
         axes[1].legend()
+        # axes[2].legend()
 
     plt.tight_layout()
     # plt.show()
