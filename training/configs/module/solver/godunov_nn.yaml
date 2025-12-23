@@ -1,4 +1,4 @@
-_target_: solvers.GodunovSolver
+_target_: training.solvers.GodunovSolver
 solver_func: nn
 g: 9.81
 # Path to checkpoint if you want to load; leave null for now

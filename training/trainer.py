@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from hydra.core.hydra_config import HydraConfig
-from module import BaseModule
+from training.module import BaseModule
 
 
 class CSVDataset(Dataset):

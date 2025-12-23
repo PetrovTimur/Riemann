@@ -1,4 +1,4 @@
-_target_: solvers.GodunovSolver
+_target_: training.solvers.GodunovSolver
 solver_func: newton
 g: 9.81
 model: null

@@ -225,7 +225,7 @@ class GodunovSolver(BaseSolver):
         self.g = g
         self.model = model
         self.solver_func = solver_func
-        print(self.solver_func)
+        # print(self.solver_func)
 
     def step(self, h, hu, dx, dt):
         n = len(h)
@@ -267,7 +267,7 @@ class CabaretSolver(BaseSolver):
 
         # Acceptable solver options: 'default', 'iter', 'newton', 'nn'
         self.solver_func = solver_func
-        print("Cabaret solver: ", self.solver_func)
+        # print("Cabaret solver: ", self.solver_func)
 
         self.dx, self.dt = None, None
         self.h, self.hu, self.pos_char, self.neg_char = None, None, None, None

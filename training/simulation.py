@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from solvers import (
+from training.solvers import (
     CabaretSolver,
     GodunovSolver,
     CabaretSolverNN,
@@ -12,7 +12,7 @@ from solvers import (
     CabaretSolverPlusPlus,
     BaseSolver
 )
-from models import load_nn
+from training.models import load_nn
 
 
 class Simulation:
@@ -34,7 +34,7 @@ class Simulation:
 
 
             if isinstance(self.solver, GodunovSolver):
-                print(len(self.h))
+                # print(len(self.h))
                 self.h = self.h[::2]
                 self.hu = self.hu[::2]
 
@@ -120,7 +120,7 @@ class Simulation:
             # dt = CFL * self.dx / np.max(np.abs(u + c))
             # dt = min(dt, CFL * self.dx / np.max(np.abs(u - c)))
 
-            u_vals = np.where(h > 1e-12, hu / h, 0.0)  # Use a small epsilon for robustness
+            u_vals = np.where(h > 1e-12, hu / np.maximum(h, 1e-12), 0.0)  # Use a small epsilon for robustness
             c_vals = np.sqrt(g * np.maximum(0.0, h))  # Ensure H is non-negative for sqrt
 
             # Calculate characteristic speeds
@@ -146,8 +146,8 @@ class Simulation:
             k += 1
 
 
-            if k > 1000:
-                raise TimeoutError
+            # if k > 1000:
+            #     raise TimeoutError
         self.h_final = h
         self.hu_final = hu
         return h, hu

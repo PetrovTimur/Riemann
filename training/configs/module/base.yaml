@@ -4,4 +4,4 @@ defaults:
   - solver: cabaret_nn
   - _self_
 
-_target_: module.BaseModule
+_target_: training.module.BaseModule

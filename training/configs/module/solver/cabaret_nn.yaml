@@ -1,4 +1,4 @@
-_target_: solvers.CabaretSolverNN
+_target_: training.solvers.CabaretSolverNN
 model: ${..model}
 softmax: False
 

@@ -4,10 +4,9 @@ from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
 
-from solvers import BaseSolver
-from simulation import Simulation, plot_comparison
-
-from metrics.toro import toro_tests
+from training.solvers import BaseSolver
+from training.simulation import Simulation, plot_comparison
+from training.metrics.toro import toro_tests
 
 
 class BaseModule(nn.Module):
