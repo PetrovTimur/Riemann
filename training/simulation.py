@@ -10,6 +10,7 @@ from training.solvers import (
     CabaretSolverGT,
     CabaretSolverPlus,
     CabaretSolverPlusPlus,
+    CabaretSolverImproved,
     BaseSolver
 )
 from training.models import load_nn
@@ -114,7 +115,7 @@ class Simulation:
         self.hu_rollout = [hu.copy()]
         k = 0
         while self.t < self.t_end:
-            # print(t)
+            print(self.t)
             # u = np.where(h > 0, hu / h, 0)
             # c = np.sqrt(g * h)
             # dt = CFL * self.dx / np.max(np.abs(u + c))
@@ -145,9 +146,11 @@ class Simulation:
 
             k += 1
 
-
             # if k > 1000:
             #     raise TimeoutError
+
+        # print(k)
+
         self.h_final = h
         self.hu_final = hu
         return h, hu
@@ -187,6 +190,7 @@ class Simulation:
         hu_pad = 0.05 * (hu_max - hu_min) if hu_max > hu_min else 0.1
 
         h_line, = axes[0].plot(x, self.h_rollout[0], label='h', color='b', marker='o')
+        print(len(x), len(self.h_rollout[0]))
         axes[0].set_title('Water Height h')
         axes[0].set_ylim(h_min - h_pad, h_max + h_pad)
         axes[0].grid(True)
@@ -225,7 +229,7 @@ def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, 
         else:
             x_plot = sim.x
             h_plot = sim.h_final
-        axes[0].plot(x_plot, h_plot, label=f'{label}')
+        axes[0].plot(x_plot, h_plot, label=f'{label}', marker='o')
     axes[0].set_title('Water Height h')
     axes[0].legend()
     axes[0].grid(True)
@@ -328,15 +332,20 @@ if __name__ == '__main__':
 
         # (8.85582160949707, 7.05979061126709, 1.3162227869033813, 8.295522689819336
 
-         'h_l': 8.85582160949707,
-         'h_r': 1.3162227869033813,
-         'u_l': 0.7971920531569991,
-         'u_r': 6.302521710124653,
+         # 'h_l': 8.85582160949707,
+         # 'h_r': 1.3162227869033813,
+         # 'u_l': 0.7971920531569991,
+         # 'u_r': 6.302521710124653,
 
-        # 'h_l': 1.0,
+        # "h_l": 0.10531860589981079,
+        # "u_l": -9.377503395080566 / 0.10531860589981079,
+        # "h_r": 1.1079761981964111,
+        # "u_r": -8.32735824584961 / 1.1079761981964111,
+
+        # 'h_l': 10.0,
         # 'h_r': 1.0,
-        # 'u_l': -1.0,
-        # 'u_r': 1.0,
+        # 'u_l': .0,
+        # 'u_r': .0,
 
         # 'h_l': 1.0,
         # 'h_r': 5.0,
@@ -348,12 +357,22 @@ if __name__ == '__main__':
         # 'u_l': 2.5,
         # 'u_r': 0,
 
+        # 'h_l': 100.0,
+        # 'h_r': 1.0,
+        # 'u_l': 0.0,
+        # 'u_r': 0.0,
+
+        'h_l': 0.1,
+        'h_r': 0.1,
+        'u_l': -3.0,
+        'u_r': 3.0,
+
         # 'h_l': 3.39,
         # 'h_r': 0.36,
         # 'u_l': 0.49,
         # 'u_r': 11.38,
 
-        't_end': 0.2,
+        't_end': 5,
         't_start': 0,
     }
 
@@ -369,19 +388,19 @@ if __name__ == '__main__':
 
         # print(h, u)
 
-    config['solver'] = CabaretSolver()
+    config['solver'] = CabaretSolverPlus()
     sim1 = Simulation(config)
     sim1.run()
     # sim.plot()
     sim1.plot_animation()
 
-    config['solver'] = GodunovSolver(solver_func='newton', model=None)
+    config['solver'] = GodunovSolver(solver_func='newton')
     sim2 = Simulation(config)
     sim2.run()
     sim2.plot_animation()
 
 
-    config['solver'] = CabaretSolverPlus(model=None)
+    config['solver'] = CabaretSolverImproved()
     # config['t_end'] = 0.2
     sim3 = Simulation(config)
     sim3.run()
@@ -398,5 +417,5 @@ if __name__ == '__main__':
 
     # plot_comparison([sim1, sim2], labels=['Cabaret', 'Godunov'], plot_solution=True)
     # plot_comparison([sim1, sim2, sim3, sim4], labels=['CabaretNN', 'Godunov', 'Cabaret+', 'CabaretClassic'], plot_solution=True, plot_u=True)
-    fig = plot_comparison([sim1, sim2, sim3], labels=['Cabaret', 'Godunov', 'CabaretPlus'], plot_solution=True)
+    fig = plot_comparison([sim1, sim2, sim3], labels=['Cabaret', 'Godunov', 'CabaretImproved'], plot_solution=True, plot_u=True)
     plt.show()

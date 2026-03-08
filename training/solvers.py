@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from scipy.optimize import fsolve, newton
 
 
 def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000):
@@ -10,6 +11,19 @@ def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000)
     h_k = np.array([hL, hR])
     u_k = np.array([uL, uR])
     c_k = np.sqrt(g * h_k)
+    #
+    # # Check for dry bed / vacuum formation
+    # # Vacuum occurs when: u_R - u_L > 2(c_L + c_R)
+    # if u_k[1] - u_k[0] > 2 * c_k.sum():
+    #     # Vacuum state: return dry bed in star region
+    #     h_star = 0.0
+    #     u_star = 0.5 * (u_k[0] + u_k[1])  # Average velocity (though meaningless in vacuum)
+    #     return {
+    #         "flux": np.array([0.0, 0.0, 0.0, 0.0]),
+    #         "star": np.array([h_star, u_star]),
+    #         "data": np.array([0]),  # No iterations for vacuum case
+    #         "velocity": np.array([u_k[0] - c_k[0], None, u_k[1] + c_k[1], None]),
+    #     }
 
     c = 0.25 * (u_k[0] - u_k[1]) + 0.5 * c_k.sum()
 
@@ -160,6 +174,168 @@ def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000)
         # "wave_left": wave_L,
         # "wave_right": wave_R
     }
+
+
+def riemann_solver_scipy(hL, huL, hR, huR, g=9.8066, tol=1e-6, use_newton=True):
+    """
+    Riemann solver using scipy optimization routines.
+
+    Parameters:
+    -----------
+    hL, huL : float
+        Left state: water depth and momentum
+    hR, huR : float
+        Right state: water depth and momentum
+    g : float
+        Gravitational acceleration
+    tol : float
+        Convergence tolerance
+    use_newton : bool
+        If True, use scipy.optimize.newton (faster for 1D)
+        If False, use scipy.optimize.fsolve (more robust)
+
+    Returns:
+    --------
+    dict : Same format as riemann_solver_newton
+    """
+
+    # Compute velocities
+    uL = huL / hL if hL > 0 else 0
+    uR = huR / hR if hR > 0 else 0
+
+    h_k = np.array([hL, hR])
+    u_k = np.array([uL, uR])
+    c_k = np.sqrt(g * h_k)
+
+    # Check for dry bed / vacuum formation
+    # Vacuum occurs when: u_R - u_L > 2(c_L + c_R)
+    if u_k[1] - u_k[0] > 2 * c_k.sum():
+        # Vacuum state: return dry bed in star region
+        h_star = 0.0
+        u_star = 0.5 * (u_k[0] + u_k[1])  # Average velocity (though meaningless in vacuum)
+        return {
+            "flux": np.array([0.0, 0.0, 0.0, 0.0]),
+            "star": np.array([h_star, u_star]),
+            "data": np.array([0]),  # No iterations for vacuum case
+            "velocity": np.array([u_k[0] - c_k[0], None, u_k[1] + c_k[1], None]),
+        }
+
+    # Initial guess for c_star
+    c_initial = 0.25 * (u_k[0] - u_k[1]) + 0.5 * c_k.sum()
+
+    # Define the residual function
+    def residual(c):
+        """Residual function for finding c_star"""
+        s_k = c / c_k
+        phi_k = np.where(s_k >= 1,
+                        ((c - c_k) * (s_k + 1) * np.sqrt(1 + s_k ** -2) / np.sqrt(2)),
+                        2 * (c - c_k))
+        return phi_k.sum() - (u_k[0] - u_k[1])
+
+    # Define derivative for Newton's method (optional, for speed)
+    def residual_derivative(c):
+        """Derivative of residual w.r.t. c"""
+        s_k = c / c_k
+        dphi_k = np.where(s_k > 1,
+                         ((2 * s_k ** 2 + 1 + s_k ** -2) / (np.sqrt(2) * s_k * np.sqrt(1 + s_k ** -2))),
+                         2)
+        return dphi_k.sum()
+
+    # Solve using scipy
+    try:
+        if use_newton:
+            # Use Newton's method with derivative
+            c = newton(residual, c_initial, fprime=residual_derivative,
+                      tol=tol, maxiter=1000)
+        else:
+            # Use fsolve (more robust, no derivative needed)
+            c = fsolve(residual, c_initial, xtol=tol, maxfev=1000)[0]
+    except (RuntimeError, ValueError):
+        # Fallback: use fsolve if Newton fails
+        c = fsolve(residual, c_initial, xtol=tol, maxfev=1000)[0]
+
+    # Compute phi_k at solution
+    s_k = c / c_k
+    phi_k = np.where(s_k >= 1,
+                    ((c - c_k) * (s_k + 1) * np.sqrt(1 + s_k ** -2) / np.sqrt(2)),
+                    2 * (c - c_k))
+
+    # Star region values
+    h_star = c ** 2 / g
+    u_star = 0.5 * (u_k.sum() + phi_k[1] - phi_k[0])
+
+    def compute_wave(u, h):
+        """Compute wave structure and velocities"""
+        D_L, D_R, D_starL, D_starR = None, None, None, None
+        if u > 0:  # Contact to the right
+            if c > c_k[0]:  # Shock wave
+                D_L = uL - c * np.sqrt(1 + (c / c_k[0]) ** 2) / np.sqrt(2)
+                if D_L < 0:
+                    H = h
+                    U = u
+                else:
+                    H = hL
+                    U = uL
+            else:  # Rarefaction
+                c_starL = c_k[0] + (uL - u) / 2
+                D_starL = u - c_starL
+                D_L = u - c_k[0]
+
+                if D_starL < 0:
+                    H = h
+                    U = u
+                elif D_L > 0:
+                    H = hL
+                    U = uL
+                else:
+                    c_star = (2 * c_k[0] + uL) / 3
+                    U = c_star
+                    H = c_star ** 2 / g
+        else:  # Contact to the left
+            if c > c_k[1]:  # Shock wave
+                D_R = uR + c * np.sqrt(1 + (c / c_k[1]) ** 2) / np.sqrt(2)
+                if D_R > 0:
+                    H = h
+                    U = u
+                else:
+                    H = hR
+                    U = uR
+            else:  # Rarefaction
+                c_starR = c_k[1] - (uR - u) / 2
+                D_starR = u + c_starR
+                D_R = u + c_k[1]
+
+                if D_starR > 0:
+                    H = h
+                    U = u
+                elif D_R < 0:
+                    H = hR
+                    U = uR
+                else:
+                    c_star = (2 * c_k[1] - uR) / 3
+                    U = -c_star
+                    H = c_star ** 2 / g
+        return H, U, D_L, D_starL, D_R, D_starR
+
+    # Compute wave structure
+    res = compute_wave(u_star, h_star)
+    H, U = res[:2]
+    D_L, D_starL, D_R, D_starR = res[2:]
+
+    # Compute fluxes
+    F_h = H * U
+    F_hu = H * U ** 2 + 0.5 * g * H ** 2
+
+    F_h_star = h_star * u_star
+    F_hu_star = h_star * u_star ** 2 + 0.5 * g * h_star ** 2
+
+    return {
+        "flux": np.array([F_h, F_hu, H, U]),
+        "star": np.array([h_star, u_star]),
+        "data": np.array([0]),  # No iteration count in scipy version
+        "velocity": np.array([D_L, D_starL, D_R, D_starR]),
+    }
+
 
 def flux(h, hu, g=9.81):
     u = np.where(h > 0, hu / h, 0)  # Avoid division by zero
@@ -363,7 +539,7 @@ class CabaretSolver(BaseSolver):
 
 
 class CabaretSolverPlus(CabaretSolver):
-    def __init__(self, model, g=9.806):
+    def __init__(self, model=None, g=9.806):
         super().__init__(g=g)
 
         self.h_combined_n = None
@@ -871,50 +1047,359 @@ class CabaretSolverNN(CabaretSolver):
             self.hu[i] = self.h[i] * self.u[i]
 
 
-class CabaretSolverImproved(CabaretSolver):
-    def __init__(self, model, g=9.81):
-        super().__init__(g=g)
+class CabaretSolverImproved(CabaretSolverPlus):
+    """CABARET solver with locally implicit sonic point processing.
+
+    Implements the algorithm from Afanasiev & Goloviznin:
+    - Equations (15)-(16): Implicit transfer of invariants along characteristics
+      at sonic points using 2nd-order Lagrange interpolation
+    - Equation (19): Non-linear correction (monotonization) at sonic points
+    - Standard CABARET (4)-(6) at non-sonic points
+    """
+
+    def __init__(self, model=None, g=9.81, newton_tol=1e-8, newton_max_iter=100):
+        super().__init__(model=model, g=g)
+        self.newton_tol = newton_tol
+        self.newton_max_iter = newton_max_iter
+
+    def _evaluate_lagrange_I1(self, u, c, j):
+        """Evaluate the Lagrange polynomial P2(xi_hat) for invariant I1.
+
+        Constructs a 2nd-order interpolating polynomial (eq 13) through:
+          - (I1)^{n+1/2}_{j-1} at xi = 0          (left cell center)
+          - (I1)^n_j           at xi = xi_bar_1    (node, carried by characteristic from t_n)
+          - (I1)^{n+1/2}_{j}   at xi = dx          (right cell center)
+
+        Evaluates at xi_hat_1, the foot of the characteristic from (x_j, t_{n+1})
+        going backward to t_{n+1/2} (eq 14).
+
+        Args:
+            u, c: unknown velocity and wave speed at node j, time n+1
+            j: node index
+        """
+        eps = 1e-12
+        dx = self.dx
+        dt = self.dt
+
+        # Eigenvalue at node j, time n
+        u_j_n = self.hu_node_n[j] / (self.h_node_n[j] + eps)
+        c_j_n = np.sqrt(self.g * max(0.0, self.h_node_n[j]))
+        lambda1_n = u_j_n + c_j_n
+
+        # xi_bar_1: foot of characteristic from (x_j, t_n) forward to t_{n+1/2}
+        # eq (12): xi_bar_1 = 0.5 * h_{i-1/2} + 0.5 * tau * lambda1^n
+        xi_bar = 0.5 * dx + 0.5 * dt * lambda1_n
+
+        # xi_hat_1: foot of characteristic from (x_j, t_{n+1}) backward to t_{n+1/2}
+        # eq (14): xi_hat_1 = 0.5 * h_{i-1/2} - 0.5 * tau * (u + c)
+        xi_hat = 0.5 * dx - 0.5 * dt * (u + c)
+
+        # I1 values at the three interpolation points
+        u_cell_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        c_cell_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
+        u_node_n = self.hu_node_n / (self.h_node_n + eps)
+        c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
+
+        f0 = u_cell_half[j - 1] + 2.0 * c_cell_half[j - 1]  # I1 at left cell
+        f1 = u_node_n[j] + 2.0 * c_node_n[j]                  # I1 at node j
+        f2 = u_cell_half[j] + 2.0 * c_cell_half[j]            # I1 at right cell
+
+        # Lagrange basis polynomials evaluated at xi_hat (eq 13)
+        # L0 at xi=0:       L0 = (xi_hat - xi_bar)(xi_hat - dx) / [(0 - xi_bar)(0 - dx)]
+        # L1 at xi=xi_bar:  L1 = (xi_hat)(xi_hat - dx)          / [(xi_bar)(xi_bar - dx)]
+        # L2 at xi=dx:      L2 = (xi_hat)(xi_hat - xi_bar)      / [(dx)(dx - xi_bar)]
+        denom0 = xi_bar * dx
+        denom1 = xi_bar * (xi_bar - dx)
+        denom2 = dx * (dx - xi_bar)
+
+        # Safeguard denominators
+        denom0 = denom0 if abs(denom0) > eps else np.copysign(eps, denom0) if denom0 != 0 else eps
+        denom1 = denom1 if abs(denom1) > eps else np.copysign(eps, denom1) if denom1 != 0 else eps
+        denom2 = denom2 if abs(denom2) > eps else np.copysign(eps, denom2) if denom2 != 0 else eps
+
+        L0 = (xi_hat - xi_bar) * (xi_hat - dx) / denom0
+        L1 = xi_hat * (xi_hat - dx) / denom1
+        L2 = xi_hat * (xi_hat - xi_bar) / denom2
+
+        return f0 * L0 + f1 * L1 + f2 * L2
+
+    def _evaluate_lagrange_I2(self, u, c, j):
+        """Evaluate the Lagrange polynomial P2(xi_hat) for invariant I2.
+
+        Same structure as _evaluate_lagrange_I1 but for the I2 characteristic,
+        using lambda2 = u - c and I2 = u - 2c (eq 16).
+        """
+        eps = 1e-12
+        dx = self.dx
+        dt = self.dt
+
+        # Eigenvalue at node j, time n
+        u_j_n = self.hu_node_n[j] / (self.h_node_n[j] + eps)
+        c_j_n = np.sqrt(self.g * max(0.0, self.h_node_n[j]))
+        lambda2_n = u_j_n - c_j_n
+
+        # xi_bar_2: foot of characteristic from (x_j, t_n) forward
+        xi_bar = 0.5 * dx + 0.5 * dt * lambda2_n
+
+        # xi_hat_2: foot of characteristic from (x_j, t_{n+1}) backward
+        xi_hat = 0.5 * dx - 0.5 * dt * (u - c)
+
+        # I2 values at the three interpolation points
+        u_cell_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        c_cell_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
+        u_node_n = self.hu_node_n / (self.h_node_n + eps)
+        c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
+
+        f0 = u_cell_half[j - 1] - 2.0 * c_cell_half[j - 1]  # I2 at left cell
+        f1 = u_node_n[j] - 2.0 * c_node_n[j]                  # I2 at node j
+        f2 = u_cell_half[j] - 2.0 * c_cell_half[j]            # I2 at right cell
+
+        # Lagrange basis polynomials evaluated at xi_hat
+        denom0 = xi_bar * dx
+        denom1 = xi_bar * (xi_bar - dx)
+        denom2 = dx * (dx - xi_bar)
+
+        denom0 = denom0 if abs(denom0) > eps else np.copysign(eps, denom0) if denom0 != 0 else eps
+        denom1 = denom1 if abs(denom1) > eps else np.copysign(eps, denom1) if denom1 != 0 else eps
+        denom2 = denom2 if abs(denom2) > eps else np.copysign(eps, denom2) if denom2 != 0 else eps
+
+        L0 = (xi_hat - xi_bar) * (xi_hat - dx) / denom0
+        L1 = xi_hat * (xi_hat - dx) / denom1
+        L2 = xi_hat * (xi_hat - xi_bar) / denom2
+
+        return f0 * L0 + f1 * L1 + f2 * L2
+
+    def _compute_residual_F1(self, u, c, j):
+        """Residual F1 = (u + 2c) - P2(xi_hat_1) for equation (15)."""
+        return (u + 2.0 * c) - self._evaluate_lagrange_I1(u, c, j)
+
+    def _compute_residual_F2(self, u, c, j):
+        """Residual F2 = (u - 2c) - P2(xi_hat_2) for equation (16)."""
+        return (u - 2.0 * c) - self._evaluate_lagrange_I2(u, c, j)
+
+    def _get_initial_guess(self, j):
+        """Get initial guess for Newton's method using the averaging method (eq 11).
+
+        Uses the average of invariants from neighboring cells as starting point,
+        which typically gives convergence in 2-3 Newton iterations.
+        """
+        eps = 1e-12
+        u_cell = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        c_cell = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
+
+        I1_avg = 0.5 * ((u_cell[j - 1] + 2 * c_cell[j - 1]) + (u_cell[j] + 2 * c_cell[j]))
+        I2_avg = 0.5 * ((u_cell[j - 1] - 2 * c_cell[j - 1]) + (u_cell[j] - 2 * c_cell[j]))
+
+        u_guess = 0.5 * (I1_avg + I2_avg)
+        c_guess = 0.25 * (I1_avg - I2_avg)
+        c_guess = max(c_guess, 1e-6)
+
+        return u_guess, c_guess
+
+    def _solve_implicit_case_A(self, j, I2_value):
+        """Case A (eq 17): Sonic only in I1.
+
+        Use constraint u - 2c = I2_value to reduce to one equation F1(c) = 0.
+        """
+        _, c_guess = self._get_initial_guess(j)
+        eps = 1e-12
+
+        def residual_c(c_val):
+            c_val = max(c_val, eps)
+            u_val = I2_value + 2.0 * c_val
+            return self._compute_residual_F1(u_val, c_val, j)
+
+        try:
+            c_sol = newton(residual_c, c_guess, tol=self.newton_tol, maxiter=self.newton_max_iter)
+            c_sol = max(c_sol, eps)
+        except (RuntimeError, ValueError):
+            try:
+                c_sol = fsolve(residual_c, c_guess, xtol=self.newton_tol, maxfev=self.newton_max_iter * 10)[0]
+                c_sol = max(c_sol, eps)
+            except (RuntimeError, ValueError):
+                c_sol = c_guess
+
+        u_sol = I2_value + 2.0 * c_sol
+        return u_sol, c_sol
+
+    def _solve_implicit_case_B(self, j, I1_value):
+        """Case B (eq 18): Sonic only in I2.
+
+        Use constraint u + 2c = I1_value to reduce to one equation F2(c) = 0.
+        """
+        _, c_guess = self._get_initial_guess(j)
+        eps = 1e-12
+
+        def residual_c(c_val):
+            c_val = max(c_val, eps)
+            u_val = I1_value - 2.0 * c_val
+            return self._compute_residual_F2(u_val, c_val, j)
+
+        try:
+            c_sol = newton(residual_c, c_guess, tol=self.newton_tol, maxiter=self.newton_max_iter)
+            c_sol = max(c_sol, eps)
+        except (RuntimeError, ValueError):
+            try:
+                c_sol = fsolve(residual_c, c_guess, xtol=self.newton_tol, maxfev=self.newton_max_iter * 10)[0]
+                c_sol = max(c_sol, eps)
+            except (RuntimeError, ValueError):
+                c_sol = c_guess
+
+        u_sol = I1_value - 2.0 * c_sol
+        return u_sol, c_sol
+
+    def _solve_implicit_case_C(self, j):
+        """Case C: Sonic in both I1 and I2.
+
+        Solve the full 2x2 system F1(u, c) = 0, F2(u, c) = 0 (eqs 15-16).
+        """
+        u_guess, c_guess = self._get_initial_guess(j)
+        eps = 1e-12
+
+        def residuals(x):
+            u_val, c_val = x
+            c_val = max(c_val, eps)
+            F1 = self._compute_residual_F1(u_val, c_val, j)
+            F2 = self._compute_residual_F2(u_val, c_val, j)
+            return [F1, F2]
+
+        try:
+            solution = fsolve(residuals, [u_guess, c_guess],
+                              xtol=self.newton_tol, maxfev=self.newton_max_iter * 10)
+            u_sol = solution[0]
+            c_sol = max(solution[1], eps)
+        except (RuntimeError, ValueError):
+            u_sol, c_sol = u_guess, c_guess
+
+        return u_sol, c_sol
 
     def _step2(self):
-        self.u = self.hu / self.h
+        """Characteristic phase with locally implicit sonic point processing.
 
-        # В четных точках старые инварианты (n слой), в консервативных точках на полуцелом шаге по времени (n + 1/2)
-        neg_char_new = self.u - 2 * np.sqrt(self.g * self.h)
-        pos_char_new = self.u + 2 * np.sqrt(self.g * self.h)
+        For each internal node:
+        1. Detect sonic points (eigenvalue sign change across adjacent cells)
+        2. Compute provisional invariants:
+           - Non-sonic: standard extrapolation (eq 4)
+           - Sonic: implicit Lagrange interpolation along characteristics (eqs 15-18)
+        3. Monotonize using maximum principle:
+           - Non-sonic: standard bounds (eq 5)
+           - Sonic: wider bounds using both adjacent cells (eq 19)
+        4. Recover h, u from corrected invariants (eq 6)
+        """
+        eps = 1e-12
 
-        for i in range(2, neg_char_new.shape[0] - 1, 2):
-            lambda_left_neg = self.u[i - 1] - (self.g * self.h[i - 1]) ** 0.5
-            lambda_left_pos = self.u[i - 1] + (self.g * self.h[i - 1]) ** 0.5
-            lambda_right_neg = self.u[i + 1] - (self.g * self.h[i + 1]) ** 0.5
-            lambda_right_pos = self.u[i + 1] + (self.g * self.h[i + 1]) ** 0.5
+        # Cell center values at n+1/2
+        u_cell_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        c_cell_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
 
-            # Кабаре с обработкой звуковых точек, не дописан, не используется
-            if (np.sign(lambda_left_neg) != np.sign(lambda_right_neg) or np.sign(lambda_left_pos) != np.sign(lambda_right_pos)):
-                c_middle = ((self.g * self.h[i - 1]) ** 0.5 + (self.g * self.h[i + 1]) ** 0.5) / 2
-                u_middle = (self.u[i - 1] + self.u[i + 1]) / 2
-                lambda_middle_neg = u_middle - c_middle
-                lambda_middle_pos = u_middle + c_middle
-                neg_char_middle = u_middle - 2 * c_middle
-                pos_char_middle = u_middle + 2 * c_middle
-                if np.sign(lambda_left_neg) != np.sign(lambda_right_neg):
-                    neg_char_new[i] = 2 * neg_char_middle - self.neg_char[i]
+        I1_cell_half = u_cell_half + 2.0 * c_cell_half
+        I2_cell_half = u_cell_half - 2.0 * c_cell_half
+
+        lambda1_cell_half = u_cell_half + c_cell_half
+        lambda2_cell_half = u_cell_half - c_cell_half
+
+        # Node values at n
+        u_node_n = self.hu_node_n / (self.h_node_n + eps)
+        c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
+
+        I1_node_n = u_node_n + 2.0 * c_node_n
+        I2_node_n = u_node_n - 2.0 * c_node_n
+
+        # Initialize arrays
+        I1_node_new = np.zeros(self.N_nodes)
+        I2_node_new = np.zeros(self.N_nodes)
+
+        self.h_node_n_plus_1_char = np.zeros(self.N_nodes)
+        self.hu_node_n_plus_1_char = np.zeros(self.N_nodes)
+
+        for j in range(1, self.N_nodes - 1):
+            # --- Step 1: Sonic Point Detection (Section 5) ---
+            sonic_I1 = (lambda1_cell_half[j - 1] * lambda1_cell_half[j] <= 0)
+            sonic_I2 = (lambda2_cell_half[j - 1] * lambda2_cell_half[j] <= 0)
+
+            # --- Step 2 & 3: Compute provisional (tilde) invariants ---
+            if sonic_I1 and sonic_I2:
+                # Case C: Both invariants sonic - solve full implicit system
+                u_impl, c_impl = self._solve_implicit_case_C(j)
+                I1_tilde = u_impl + 2.0 * c_impl
+                I2_tilde = u_impl - 2.0 * c_impl
+
+            elif sonic_I1:
+                # Case A: Only I1 is sonic
+                # Standard extrapolation for I2 (eq 4)
+                if lambda2_cell_half[j - 1] >= 0:
+                    I2_tilde = 2.0 * I2_cell_half[j - 1] - I2_node_n[j - 1]
                 else:
-                    neg_char_new[i] = 2 * self.neg_char[i + 1] - self.neg_char[i + 2]
-                if np.sign(lambda_left_pos) != np.sign(lambda_right_pos):
-                    pos_char_new[i] = 2 * pos_char_middle - self.pos_char[i]
+                    I2_tilde = 2.0 * I2_cell_half[j] - I2_node_n[j + 1]
+                # Implicit solve for I1 with I2 constraint (eq 17)
+                u_impl, c_impl = self._solve_implicit_case_A(j, I2_tilde)
+                I1_tilde = u_impl + 2.0 * c_impl
+
+            elif sonic_I2:
+                # Case B: Only I2 is sonic
+                # Standard extrapolation for I1 (eq 4)
+                if lambda1_cell_half[j - 1] >= 0:
+                    I1_tilde = 2.0 * I1_cell_half[j - 1] - I1_node_n[j - 1]
                 else:
-                    pos_char_new[i] = 2 * self.pos_char[i - 1] - self.pos_char[i - 2]
+                    I1_tilde = 2.0 * I1_cell_half[j] - I1_node_n[j + 1]
+                # Implicit solve for I2 with I1 constraint (eq 18)
+                u_impl, c_impl = self._solve_implicit_case_B(j, I1_tilde)
+                I2_tilde = u_impl - 2.0 * c_impl
+
             else:
-                neg_char_new[i] = 2 * neg_char_new[i + 1] - self.neg_char[i + 2]
-                pos_char_new[i] = 2 * pos_char_new[i - 1] - self.pos_char[i - 2]
+                # No sonic point: Standard CABARET extrapolation (eq 4)
+                if lambda1_cell_half[j - 1] >= 0:
+                    I1_tilde = 2.0 * I1_cell_half[j - 1] - I1_node_n[j - 1]
+                else:
+                    I1_tilde = 2.0 * I1_cell_half[j] - I1_node_n[j + 1]
 
-        self._correct_invariants(self.pos_char, self.neg_char, pos_char_new, neg_char_new)
+                if lambda2_cell_half[j - 1] >= 0:
+                    I2_tilde = 2.0 * I2_cell_half[j - 1] - I2_node_n[j - 1]
+                else:
+                    I2_tilde = 2.0 * I2_cell_half[j] - I2_node_n[j + 1]
 
-        for i in range(2, len(self.u) - 1, 2):
-            self.u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
-            self.h[i] = ((pos_char_new[i] - neg_char_new[i]) / 4) ** 2 / self.g
-            self.hu[i] = self.h[i] * self.u[i]
+            # --- Step 4: Monotonization (Non-Linear Correction) ---
+            # Each invariant gets bounds based on whether IT is sonic,
+            # not whether the node has any sonic point.
+            # Sonic invariant (eq 19): both cell centers + node value
+            # Non-sonic invariant (eq 5): relevant cell + its two bounding nodes
+            if sonic_I1:
+                min_I1 = min(I1_cell_half[j - 1], I1_node_n[j], I1_cell_half[j])
+                max_I1 = max(I1_cell_half[j - 1], I1_node_n[j], I1_cell_half[j])
+            else:
+                if lambda1_cell_half[j - 1] >= 0:
+                    idx1 = j - 1
+                else:
+                    idx1 = j
+                min_I1 = min(I1_node_n[idx1], I1_cell_half[idx1], I1_node_n[idx1 + 1])
+                max_I1 = max(I1_node_n[idx1], I1_cell_half[idx1], I1_node_n[idx1 + 1])
 
+            if sonic_I2:
+                min_I2 = min(I2_cell_half[j - 1], I2_node_n[j], I2_cell_half[j])
+                max_I2 = max(I2_cell_half[j - 1], I2_node_n[j], I2_cell_half[j])
+            else:
+                if lambda2_cell_half[j - 1] >= 0:
+                    idx2 = j - 1
+                else:
+                    idx2 = j
+                min_I2 = min(I2_node_n[idx2], I2_cell_half[idx2], I2_node_n[idx2 + 1])
+                max_I2 = max(I2_node_n[idx2], I2_cell_half[idx2], I2_node_n[idx2 + 1])
+
+            I1_node_new[j] = np.clip(I1_tilde, min_I1, max_I1)
+            I2_node_new[j] = np.clip(I2_tilde, min_I2, max_I2)
+
+            # --- Step 5: Recover h, u from invariants (eq 6) ---
+            self.h_node_n_plus_1_char[j] = ((I1_node_new[j] - I2_node_new[j]) / 4.0) ** 2 / self.g
+            u_new = (I1_node_new[j] + I2_node_new[j]) / 2.0
+
+            self.h_node_n_plus_1_char[j] = max(0.0, self.h_node_n_plus_1_char[j])
+            self.hu_node_n_plus_1_char[j] = self.h_node_n_plus_1_char[j] * u_new
+
+        # Boundary conditions
+        self.h_node_n_plus_1_char[0] = self.h_node_n[0]
+        self.hu_node_n_plus_1_char[0] = self.hu_node_n[0]
+        self.h_node_n_plus_1_char[-1] = self.h_node_n[-1]
+        self.hu_node_n_plus_1_char[-1] = self.hu_node_n[-1]
 
 
 
@@ -926,7 +1411,9 @@ class RiemannSolver:
         # print(self.solver_func)
 
     def solve(self, x, t: float, h_l: float, u_l: float, h_r: float, u_r: float):
-        res = riemann_solver_newton(h_l, h_l * u_l, h_r, h_r * u_r)
+        # res = riemann_solver_newton(h_l, h_l * u_l, h_r, h_r * u_r)
+        res = riemann_solver_scipy(h_l, h_l * u_l, h_r, h_r * u_r)
+        # print(res)
         h_star, u_star = res['star']
         D_L, D_starL, D_R, D_starR = res['velocity']
 

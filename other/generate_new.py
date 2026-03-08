@@ -1,4 +1,5 @@
 import os
+
 import torch
 from torch.utils.data import TensorDataset
 import matplotlib.pyplot as plt
@@ -9,11 +10,10 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from training.simulation import Simulation
-from training.solvers import CabaretSolverPlus, RiemannSolver
+from training.solvers import CabaretSolverPlus, RiemannSolver, riemann_solver_newton
 
 # Constants
 G = 9.806
-RIEMANN_INV_FACTOR = 2  # Factor for Riemann invariants: I1 = u + 2*c, I2 = u - 2*c
 
 
 def load_and_preprocess_data(file_path: str, exclude_category: int = 8) -> pd.DataFrame:
@@ -136,9 +136,14 @@ def create_output_dataframe() -> pd.DataFrame:
         'I2_cell_n_plus_half[j-1]', 'I2_cell_n_plus_half[j]',
         'I1_cell_n[j-1]', 'I1_cell_n[j]',
         'I2_cell_n[j-1]', 'I2_cell_n[j]',
-        'I1_node_true', 'I2_node_true'
+        'I1_node_true', 'I2_node_true',
+        'meta'
     ]
-    return pd.DataFrame(columns=columns)
+    df = pd.DataFrame(columns=columns)
+    # Make sure pandas treats this column as generic Python objects (strings/dicts)
+    # so we can safely store JSON without dtype warnings.
+    df['meta'] = df['meta'].astype('object')
+    return df
 
 
 
@@ -172,9 +177,15 @@ def run_simulation(hL: float, huL: float, hR: float, huR: float,
         't_start': 0,
     }
 
+    t_rand = 5e-3
+    config["t_start"] = t_rand
+    config["t_end"] = t_rand + 1e-12
+
+
     sim = Simulation(config)
     sim.run()
 
+    # print(sim.t)
 
     # Compute exact solution for comparison
     true_solver = RiemannSolver()
@@ -185,7 +196,7 @@ def run_simulation(hL: float, huL: float, hR: float, huR: float,
     return sim, (h, u)
 
 
-def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, window: int = 1):
+def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, use_local_riemann: bool = False):
     """
     Extract Riemann invariants from solver state at various spatial/temporal positions
     and append to output DataFrame.
@@ -194,94 +205,169 @@ def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, window: 
     - Nodes at time n
     - Cells at time n
     - Cells at time n+1/2
-    - True values at cells from exact solver
+    - True values at cells from exact solver OR local Riemann solution
+
+    Only extracts points where the flow is "interesting" (supersonic: |u| > c).
 
     Args:
         solver: CABARET solver object with solution data
         target: Tuple of (h_true, u_true) from exact solver
         output_df: DataFrame to append extracted data to
-        window: Window size around midpoint for extraction
+        use_local_riemann: If True, use local Riemann solution from n+1/2 cell values
+                          instead of exact solution for true targets
 
     Returns:
-        Last computed targets (I1, I2) for the last interior node
+        Number of interesting points extracted
     """
     g = solver.g
 
-    # Extract node data at time n (centered around midpoint)
+    # Compute Riemann invariants for ALL nodes at time n
     node_count = solver.h_node_n.shape[0]
-    mid_idx = node_count // 2
-    h_node_n = solver.h_node_n[mid_idx - window : mid_idx + window + 1]
-    hu_node_n = solver.hu_node_n[mid_idx - window : mid_idx + window + 1]
+    h_node_n = solver.h_node_n
+    hu_node_n = solver.hu_node_n
 
     u_node_n = hu_node_n / (h_node_n + 1e-12)
     c_node_n = np.sqrt(g * np.maximum(0.0, h_node_n))
-    I1_node_n = u_node_n + RIEMANN_INV_FACTOR * c_node_n
-    I2_node_n = u_node_n - RIEMANN_INV_FACTOR * c_node_n
+    I1_node_n = u_node_n + 2 * c_node_n
+    I2_node_n = u_node_n - 2 * c_node_n
 
-    # Extract cell data at time n
+    # Compute Riemann invariants for ALL cells at time n
     cell_count = solver.h_cell_n.shape[0]
-    mid_idx_cell = cell_count // 2
-    h_cell_n = solver.h_cell_n[mid_idx_cell - window : mid_idx_cell + window]
-    hu_cell_n = solver.hu_cell_n[mid_idx_cell - window : mid_idx_cell + window]
+    h_cell_n = solver.h_cell_n
+    hu_cell_n = solver.hu_cell_n
 
     u_cell_n = hu_cell_n / (h_cell_n + 1e-12)
     c_cell_n = np.sqrt(g * np.maximum(0.0, h_cell_n))
-    I1_cell_n = u_cell_n + RIEMANN_INV_FACTOR * c_cell_n
-    I2_cell_n = u_cell_n - RIEMANN_INV_FACTOR * c_cell_n
+    I1_cell_n = u_cell_n + 2 * c_cell_n
+    I2_cell_n = u_cell_n - 2 * c_cell_n
 
-    # Extract cell data at time n+1/2
-    h_cell_n_plus_half = solver.h_cell_n_plus_half[mid_idx_cell - window : mid_idx_cell + window]
-    hu_cell_n_plus_half = solver.hu_cell_n_plus_half[mid_idx_cell - window : mid_idx_cell + window]
+    # Compute Riemann invariants for ALL cells at time n+1/2
+    h_cell_n_plus_half = solver.h_cell_n_plus_half
+    hu_cell_n_plus_half = solver.hu_cell_n_plus_half
 
     u_cell_n_plus_half = hu_cell_n_plus_half / (h_cell_n_plus_half + 1e-12)
     c_cell_n_plus_half = np.sqrt(g * np.maximum(0.0, h_cell_n_plus_half))
-    I1_cell_n_plus_half = u_cell_n_plus_half + RIEMANN_INV_FACTOR * c_cell_n_plus_half
-    I2_cell_n_plus_half = u_cell_n_plus_half - RIEMANN_INV_FACTOR * c_cell_n_plus_half
+    I1_cell_n_plus_half = u_cell_n_plus_half + 2 * c_cell_n_plus_half
+    I2_cell_n_plus_half = u_cell_n_plus_half - 2 * c_cell_n_plus_half
 
-    # Extract true solution at cells
-    h, u = target
-    h_cell_true = h[1::2][mid_idx_cell - window : mid_idx_cell + window]
-    u_cell_true = u[1::2][mid_idx_cell - window : mid_idx_cell + window]
+    # Create interesting mask: supersonic flow (|u| > c)
+    interesting_mask = np.abs(u_cell_n_plus_half) > c_cell_n_plus_half
 
-    c_cell_true = np.sqrt(g * np.maximum(0.0, h_cell_true))
-    I1_cell_true = u_cell_true + RIEMANN_INV_FACTOR * c_cell_true
-    I2_cell_true = u_cell_true - RIEMANN_INV_FACTOR * c_cell_true
+    # Compute true solution Riemann invariants
+    if use_local_riemann:
+        # Use local Riemann solution from cell n+1/2 values
+        # Only compute for interesting cells
+        I1_cell_true = np.zeros(cell_count)
+        I2_cell_true = np.zeros(cell_count)
 
-    # Build feature vectors for each interior node
-    last_targets = None
-    for i in range(1, len(h_node_n) - 1):
+        # Get indices of interesting cells
+        interesting_indices = np.where(interesting_mask)[0]
+
+        for cell_idx in interesting_indices:
+            # Skip boundary cells
+            if cell_idx == 0 or cell_idx >= cell_count - 1:
+                continue
+
+            # Get left and right states at cell interfaces from n+1/2
+            hL = h_cell_n_plus_half[cell_idx]
+            huL = hu_cell_n_plus_half[cell_idx]
+            hR = h_cell_n_plus_half[cell_idx + 1]
+            huR = hu_cell_n_plus_half[cell_idx + 1]
+
+            # Solve local Riemann problem
+            solution = riemann_solver_newton(hL, huL, hR, huR, g=g)
+            h_star, u_star = solution['star']
+
+            # Compute Riemann invariants from solution
+            c_star = np.sqrt(g * np.maximum(0.0, h_star))
+            I1_cell_true[cell_idx] = u_star + 2 * c_star
+            I2_cell_true[cell_idx] = u_star - 2 * c_star
+    else:
+        # Use exact solution from global Riemann solver
+        h, u = target
+        h_cell_true = h[1::2]  # Extract cell values (odd indices)
+        u_cell_true = u[1::2]
+
+        c_cell_true = np.sqrt(g * np.maximum(0.0, h_cell_true))
+        I1_cell_true = u_cell_true + 2 * c_cell_true
+        I2_cell_true = u_cell_true - 2 * c_cell_true
+
+    # Extract features for interesting cells
+    # For each interesting cell i, we need:
+    # - Nodes: i-1, i, i+1, i+2 (cell i is between nodes i and i+1)
+    # - Cells: i-1, i
+    count = 0
+    for cell_idx in range(1, cell_count - 1):
+        if not interesting_mask[cell_idx]:
+            continue
+
+        # Node indices: cell i is between node i and node i+1
+        # We need nodes [i, i+1, i+2] for the stencil
+        node_idx = cell_idx
+
+        # Check bounds for nodes (need i-1, i, i+1 relative to node_idx+1)
+        if node_idx < 1 or node_idx + 2 >= node_count:
+            continue
+
+        # For cell i, we need the stencil around node i+1 (the right node of cell i)
+        # Nodes: i, i+1, i+2 (which are j-1, j, j+1 where j = i+1)
         inv_list = [
-            I1_node_n[i - 1], I1_node_n[i], I1_node_n[i + 1],
-            I2_node_n[i - 1], I2_node_n[i], I2_node_n[i + 1],
-            I1_cell_n_plus_half[i - 1], I1_cell_n_plus_half[i],
-            I2_cell_n_plus_half[i - 1], I2_cell_n_plus_half[i],
-            I1_cell_n[i - 1], I1_cell_n[i],
-            I2_cell_n[i - 1], I2_cell_n[i],
-            I1_cell_true[i], I2_cell_true[i]
+            I1_node_n[node_idx], I1_node_n[node_idx + 1], I1_node_n[node_idx + 2],
+            I2_node_n[node_idx], I2_node_n[node_idx + 1], I2_node_n[node_idx + 2],
+            I1_cell_n_plus_half[cell_idx - 1], I1_cell_n_plus_half[cell_idx],
+            I2_cell_n_plus_half[cell_idx - 1], I2_cell_n_plus_half[cell_idx],
+            I1_cell_n[cell_idx - 1], I1_cell_n[cell_idx],
+            I2_cell_n[cell_idx - 1], I2_cell_n[cell_idx],
+            I1_cell_true[cell_idx], I2_cell_true[cell_idx],
+            None,
         ]
 
         output_df.loc[len(output_df)] = inv_list
-        last_targets = inv_list[14:]  # Store targets for last iteration
+        count += 1
 
-    return last_targets if last_targets is not None else []
-
-
+    return count
 
 
-def generate_training_data(input_tensor: torch.Tensor, output_df: pd.DataFrame):
+
+
+def generate_training_data(input_tensor: torch.Tensor, output_df: pd.DataFrame, use_local_riemann: bool = False):
     """
     Generate training data by running simulations for all input samples.
 
     Args:
         input_tensor: Tensor of shape (N, 4) with [hL, huL, hR, huR] for each sample
         output_df: DataFrame to store extracted Riemann invariants
+        use_local_riemann: If True, use local Riemann solution from n+1/2 cell values
     """
-    for episode in tqdm(input_tensor, desc="Generating training data", unit="sample"):
+    pbar = tqdm(input_tensor, desc="Generating training data", unit="sample")
+    for episode in pbar:
         hL, huL, hR, huR = map(lambda x: x.item(), episode)
 
         sim, target = run_simulation(hL, huL, hR, huR)
-        extract_riemann_invariants(sim.solver, target, output_df)
 
+        # Track how many rows existed before extraction so we can attach meta
+        start_len = len(output_df)
+        extract_riemann_invariants(sim.solver, target, output_df, use_local_riemann=use_local_riemann)
+
+        # Attach meta to every row that was added for this episode.
+        # Use .at/.loc (not chained indexing) so the assignment is guaranteed to persist.
+        if len(output_df) > start_len:
+
+            meta = {
+                'hL': float(hL),
+                'huL': float(huL),
+                'hR': float(hR),
+                'huR': float(huR),
+            }
+            # Storing dicts in a CSV column is awkward; a JSON string round-trips cleanly.
+            import json
+            meta_json = json.dumps(meta, separators=(",", ":"))
+
+            for idx in range(start_len, len(output_df)):
+                output_df.at[idx, 'meta'] = meta_json
+
+        # Update progress bar with current dataframe size
+        pbar.set_postfix({"df_len": len(output_df)})
 
 
 def split_and_save_dataset(df: pd.DataFrame, output_dir: str,
@@ -329,13 +415,16 @@ def main():
     input_file = 'datasets/old/riemann_training_data_balanced2.csv'
     output_file = 'datasets/check.csv'
     output_dir = 'datasets/new_dataset'
+    use_local_riemann = True  # Set to True to use local Riemann solution from n+1/2 cell values
 
     # Load and preprocess data
     print("Loading data...")
     df = load_and_preprocess_data(input_file)
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle the dataframe
+    df = df[:1000]  # Take only first 100 samples for testing
 
     # Visualize distribution (optional)
-    plot_condition_heatmap(df, show=True)
+    plot_condition_heatmap(df, show=False)
 
     # Prepare datasets
     print("Preparing datasets...")
@@ -345,7 +434,7 @@ def main():
     new_df = create_output_dataframe()
 
     # Generate training data from simulations
-    generate_training_data(train_X_tensor, new_df)
+    generate_training_data(train_X_tensor, new_df, use_local_riemann=use_local_riemann)
 
     print(f"\nGenerated {len(new_df)} samples")
 
@@ -364,5 +453,4 @@ def main():
 
 if __name__ == "__main__":
     result_df = main()
-
 
