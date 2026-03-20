@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from training.simulation import Simulation
-from training.solvers import CabaretSolverPlus, RiemannSolver, riemann_solver_newton
+from training.solvers import CabaretSolverPlus, RiemannSolver, riemann_solver_newton, CabaretSolverImproved
 
 # Constants
 G = 9.806
@@ -172,7 +172,7 @@ def run_simulation(hL: float, huL: float, hR: float, huR: float,
         'h_r': hR,
         'u_l': huL / hL,
         'u_r': huR / hR,
-        'solver': CabaretSolverPlus(model=None),
+        'solver': CabaretSolverImproved(),
         't_end': t_end,
         't_start': 0,
     }
@@ -413,9 +413,9 @@ def main():
     """
     # Configuration
     input_file = 'datasets/old/riemann_training_data_balanced2.csv'
-    output_file = 'datasets/check.csv'
-    output_dir = 'datasets/new_dataset'
-    use_local_riemann = True  # Set to True to use local Riemann solution from n+1/2 cell values
+    output_file = 'datasets/last_improved_dataset/all.csv'
+    output_dir = 'datasets/last_improved_dataset'
+    use_local_riemann = False  # Set to True to use local Riemann solution from n+1/2 cell values
 
     # Load and preprocess data
     print("Loading data...")

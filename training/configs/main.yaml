@@ -10,11 +10,11 @@ num_pseudo_epochs: 80
 steps_per_epoch: 1000
 validation_frequency_epochs: 5
 ckpt_frequency_epochs: 10
-#train_table: datasets/riemann_invariants/riemann_invariants_only_train_filtered.csv
-#val_table: datasets/riemann_invariants/riemann_invariants_only_val.csv
-#train_table: datasets/riemann_invariants_with_true_targets/all_filtered_part1.csv
-train_table: datasets/new_dataset/train.csv
+train_table: datasets/riemann_invariants/riemann_invariants_only_train_filtered.csv
 val_table: datasets/riemann_invariants/riemann_invariants_only_val.csv
+#train_table: datasets/riemann_invariants_with_true_targets/all_filtered_part1.csv
+#train_table: datasets/last_improved_dataset/train_no_meta.csv
+#val_table: datasets/last_improved_dataset/val_no_meta.csv
 batch_size: 32
 feature_cols: 14
 target_cols: 2

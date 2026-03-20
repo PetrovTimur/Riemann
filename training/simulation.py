@@ -41,10 +41,15 @@ class Simulation:
 
 
         else:
-            self.h, self.hu = self.initial_conditions()
-
             if isinstance(self.solver, CabaretSolver):
-                self.h, self.hu = self.new_grid(self.h, self.hu)
+                init_type = config.get('init_type', 'A')
+                if init_type == 'B':
+                    self.h, self.hu = self._init_staggered_grid_B()
+                else:
+                    self.h, self.hu = self._init_staggered_grid_A()
+            else:
+                self.h, self.hu = self.initial_conditions()
+
 
         self.x = np.linspace(-self.L, self.L, len(self.h), endpoint=True)
 
@@ -105,9 +110,110 @@ class Simulation:
 
         return new_h, new_hu
 
+    def _init_staggered_grid_A(self):
+        """Initialization A (paper eqs 21-22): flux-first initialization.
+
+        The discontinuity falls in the centre of a cell between nodes i* and i*+1.
+        Flux (node) values are set directly from Riemann data (eq 22),
+        then conservative (cell) values are computed as averages of
+        neighboring flux values for H and u separately (eq 21).
+        """
+        g = getattr(self.solver, 'g', 9.81)
+        N_cells = self.nx
+        N_nodes = N_cells + 1
+        N_total = 2 * N_cells + 1
+
+        # i* is the last node that gets left-state values
+        i_star = N_cells // 2
+
+        # Set flux (node) values directly (eq 22)
+        h_nodes = np.empty(N_nodes)
+        u_nodes = np.empty(N_nodes)
+        h_nodes[:i_star + 1] = self.h_l
+        h_nodes[i_star + 1:] = self.h_r
+        u_nodes[:i_star + 1] = self.u_l
+        u_nodes[i_star + 1:] = self.u_r
+        hu_nodes = h_nodes * u_nodes
+
+        # Set conservative (cell) values: H and u averaged separately (eq 21)
+        h_cells = 0.5 * (h_nodes[:-1] + h_nodes[1:])
+        u_cells = 0.5 * (u_nodes[:-1] + u_nodes[1:])
+        hu_cells = h_cells * u_cells
+
+        # Assemble combined array: even indices = nodes, odd indices = cells
+        combined_h = np.zeros(N_total)
+        combined_hu = np.zeros(N_total)
+        combined_h[::2] = h_nodes
+        combined_h[1::2] = h_cells
+        combined_hu[::2] = hu_nodes
+        combined_hu[1::2] = hu_cells
+
+        return combined_h, combined_hu
+
+    def _init_staggered_grid_B(self):
+        """Initialization B (paper eqs 23-25): conservative-first with invariant coupling.
+
+        The discontinuity falls at grid node i*.
+        Conservative (cell) values are set directly from Riemann data (eq 23),
+        then flux (node) values are derived using Riemann invariant
+        cross-coupling from neighboring cells (eq 24).
+        Boundary nodes are set directly (eq 25).
+        """
+        g = getattr(self.solver, 'g', 9.81)
+        N_cells = self.nx
+        N_nodes = N_cells + 1
+        N_total = 2 * N_cells + 1
+
+        # i* is the node where the discontinuity falls
+        i_star = N_cells // 2
+
+        # Set conservative (cell) values directly (eq 23)
+        # Cell i lies between nodes i and i+1
+        # Cells 0..i*-1 get left state, cells i*..N_cells-1 get right state
+        h_cells = np.empty(N_cells)
+        u_cells = np.empty(N_cells)
+        h_cells[:i_star] = self.h_l
+        h_cells[i_star:] = self.h_r
+        u_cells[:i_star] = self.u_l
+        u_cells[i_star:] = self.u_r
+        hu_cells = h_cells * u_cells
+
+        # Riemann invariants at cell centers
+        c_cells = np.sqrt(g * np.maximum(0.0, h_cells))
+        R_cells = u_cells + 2.0 * c_cells   # I1
+        Q_cells = u_cells - 2.0 * c_cells   # I2
+
+        # Interior flux (node) values from invariant coupling (eq 24)
+        # Node i uses R from left cell (i-1) and Q from right cell (i)
+        h_nodes = np.zeros(N_nodes)
+        hu_nodes = np.zeros(N_nodes)
+
+        for i in range(1, N_nodes - 1):
+            R_left = R_cells[i - 1]    # R^0_{i-1/2} = I1 from left cell
+            Q_right = Q_cells[i]       # Q^0_{i+1/2} = I2 from right cell
+            h_nodes[i] = (1.0 / g) * (0.25 * (R_left - Q_right)) ** 2
+            u_i = 0.5 * (R_left + Q_right)
+            hu_nodes[i] = h_nodes[i] * u_i
+
+        # Boundary flux (node) values (eq 25)
+        h_nodes[0] = self.h_l
+        h_nodes[-1] = self.h_r
+        hu_nodes[0] = self.h_l * self.u_l
+        hu_nodes[-1] = self.h_r * self.u_r
+
+        # Assemble combined array: even indices = nodes, odd indices = cells
+        combined_h = np.zeros(N_total)
+        combined_hu = np.zeros(N_total)
+        combined_h[::2] = h_nodes
+        combined_h[1::2] = h_cells
+        combined_hu[::2] = hu_nodes
+        combined_hu[1::2] = hu_cells
+
+        return combined_h, combined_hu
+
     def run(self):
         t = 0.0
-        CFL = 0.3
+        CFL = 0.2
         g = 9.81
         h = self.h.copy()
         hu = self.hu.copy()
@@ -115,7 +221,7 @@ class Simulation:
         self.hu_rollout = [hu.copy()]
         k = 0
         while self.t < self.t_end:
-            print(self.t)
+            # print(self.t)
             # u = np.where(h > 0, hu / h, 0)
             # c = np.sqrt(g * h)
             # dt = CFL * self.dx / np.max(np.abs(u + c))
@@ -322,7 +428,7 @@ if __name__ == '__main__':
     # model2 = load_nn(path='checkpoints/model_pairs_2.pt', input_features=14, n_feats=40)
 
     config = {
-        'L': 50,
+        'L': 0.5,
         'nx': 100,
 
         # 'h_l': 1.0,
@@ -357,22 +463,23 @@ if __name__ == '__main__':
         # 'u_l': 2.5,
         # 'u_r': 0,
 
-        # 'h_l': 100.0,
-        # 'h_r': 1.0,
-        # 'u_l': 0.0,
-        # 'u_r': 0.0,
+        'h_l': 100.0,
+        'h_r': 1.0,
+        'u_l': 0.0,
+        'u_r': 0.0,
 
-        'h_l': 0.1,
-        'h_r': 0.1,
-        'u_l': -3.0,
-        'u_r': 3.0,
+
+        # 'h_l': 0.1,
+        # 'h_r': 0.1,
+        # 'u_l': -3.0,
+        # 'u_r': 3.0,
 
         # 'h_l': 3.39,
         # 'h_r': 0.36,
         # 'u_l': 0.49,
         # 'u_r': 11.38,
 
-        't_end': 5,
+        't_end': 0.012,
         't_start': 0,
     }
 
@@ -402,6 +509,7 @@ if __name__ == '__main__':
 
     config['solver'] = CabaretSolverImproved()
     # config['t_end'] = 0.2
+    config["init_type"] = "B"
     sim3 = Simulation(config)
     sim3.run()
     sim3.plot_animation()

@@ -1057,10 +1057,71 @@ class CabaretSolverImproved(CabaretSolverPlus):
     - Standard CABARET (4)-(6) at non-sonic points
     """
 
-    def __init__(self, model=None, g=9.81, newton_tol=1e-8, newton_max_iter=100):
+    def __init__(self, model=None, g=9.81, newton_tol=1e-8, newton_max_iter=100, dry_eps=1e-5, monotonize=True):
         super().__init__(model=model, g=g)
         self.newton_tol = newton_tol
         self.newton_max_iter = newton_max_iter
+        self.dry_eps = dry_eps
+        self.monotonize = monotonize
+
+    @staticmethod
+    def _safe_velocity(h, hu, eps):
+        """Compute u = hu/h, returning 0 where h < eps."""
+        return np.where(h > eps, hu / np.maximum(h, eps), 0.0)
+
+    def _apply_dry_cell(self, h, hu):
+        """Dry cell treatment: clip h >= 0, zero out momentum where h < dry_eps."""
+        h = np.maximum(h, 0.0)
+        hu = np.where(h < self.dry_eps, 0.0, hu)
+        return h, hu
+
+    def _step1(self):
+        """Phase 1 with dry cell treatment."""
+        self.u_node_n = self._safe_velocity(self.h_node_n, self.hu_node_n, self.dry_eps)
+
+        self.h_cell_n_plus_half = np.zeros(self.N_cells)
+        self.hu_cell_n_plus_half = np.zeros(self.N_cells)
+
+        for i in range(self.N_cells):
+            h_cell_n_curr = self.h_cell_n[i]
+            hu_cell_n_curr = self.hu_cell_n[i]
+
+            flux_m_i = self.F_m(self.h_node_n[i], self.u_node_n[i])
+            flux_m_i_plus_1 = self.F_m(self.h_node_n[i + 1], self.u_node_n[i + 1])
+
+            flux_h_i = self.F_h(self.h_node_n[i], self.u_node_n[i])
+            flux_h_i_plus_1 = self.F_h(self.h_node_n[i + 1], self.u_node_n[i + 1])
+
+            self.h_cell_n_plus_half[i] = h_cell_n_curr - 0.5 * self.dt / self.dx * (flux_m_i_plus_1 - flux_m_i)
+            self.hu_cell_n_plus_half[i] = hu_cell_n_curr - 0.5 * self.dt / self.dx * (flux_h_i_plus_1 - flux_h_i)
+
+        # Dry cell treatment after conservative update
+        self.h_cell_n_plus_half, self.hu_cell_n_plus_half = self._apply_dry_cell(
+            self.h_cell_n_plus_half, self.hu_cell_n_plus_half)
+
+    def _step3(self):
+        """Phase 3 with dry cell treatment."""
+        u_node_n_plus_1_char = self._safe_velocity(
+            self.h_node_n_plus_1_char, self.hu_node_n_plus_1_char, self.dry_eps)
+
+        self.h_cell_n_plus_1 = np.zeros(self.N_cells)
+        self.hu_cell_n_plus_1 = np.zeros(self.N_cells)
+
+        for i in range(self.N_cells):
+            flux_m_i_n_plus_1 = self.F_m(self.h_node_n_plus_1_char[i], u_node_n_plus_1_char[i])
+            flux_m_i_plus_1_n_plus_1 = self.F_m(self.h_node_n_plus_1_char[i + 1], u_node_n_plus_1_char[i + 1])
+
+            flux_h_i_n_plus_1 = self.F_h(self.h_node_n_plus_1_char[i], u_node_n_plus_1_char[i])
+            flux_h_i_plus_1_n_plus_1 = self.F_h(self.h_node_n_plus_1_char[i + 1], u_node_n_plus_1_char[i + 1])
+
+            self.h_cell_n_plus_1[i] = self.h_cell_n_plus_half[i] - \
+                                      0.5 * self.dt / self.dx * (flux_m_i_plus_1_n_plus_1 - flux_m_i_n_plus_1)
+            self.hu_cell_n_plus_1[i] = self.hu_cell_n_plus_half[i] - \
+                                       0.5 * self.dt / self.dx * (flux_h_i_plus_1_n_plus_1 - flux_h_i_n_plus_1)
+
+        # Dry cell treatment after conservative update
+        self.h_cell_n_plus_1, self.hu_cell_n_plus_1 = self._apply_dry_cell(
+            self.h_cell_n_plus_1, self.hu_cell_n_plus_1)
 
     def _evaluate_lagrange_I1(self, u, c, j):
         """Evaluate the Lagrange polynomial P2(xi_hat) for invariant I1.
@@ -1080,9 +1141,10 @@ class CabaretSolverImproved(CabaretSolverPlus):
         eps = 1e-12
         dx = self.dx
         dt = self.dt
+        dry = self.dry_eps
 
         # Eigenvalue at node j, time n
-        u_j_n = self.hu_node_n[j] / (self.h_node_n[j] + eps)
+        u_j_n = self._safe_velocity(self.h_node_n[j:j+1], self.hu_node_n[j:j+1], dry)[0]
         c_j_n = np.sqrt(self.g * max(0.0, self.h_node_n[j]))
         lambda1_n = u_j_n + c_j_n
 
@@ -1095,9 +1157,9 @@ class CabaretSolverImproved(CabaretSolverPlus):
         xi_hat = 0.5 * dx - 0.5 * dt * (u + c)
 
         # I1 values at the three interpolation points
-        u_cell_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        u_cell_half = self._safe_velocity(self.h_cell_n_plus_half, self.hu_cell_n_plus_half, dry)
         c_cell_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
-        u_node_n = self.hu_node_n / (self.h_node_n + eps)
+        u_node_n = self._safe_velocity(self.h_node_n, self.hu_node_n, dry)
         c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
 
         f0 = u_cell_half[j - 1] + 2.0 * c_cell_half[j - 1]  # I1 at left cell
@@ -1132,9 +1194,10 @@ class CabaretSolverImproved(CabaretSolverPlus):
         eps = 1e-12
         dx = self.dx
         dt = self.dt
+        dry = self.dry_eps
 
         # Eigenvalue at node j, time n
-        u_j_n = self.hu_node_n[j] / (self.h_node_n[j] + eps)
+        u_j_n = self._safe_velocity(self.h_node_n[j:j+1], self.hu_node_n[j:j+1], dry)[0]
         c_j_n = np.sqrt(self.g * max(0.0, self.h_node_n[j]))
         lambda2_n = u_j_n - c_j_n
 
@@ -1145,9 +1208,9 @@ class CabaretSolverImproved(CabaretSolverPlus):
         xi_hat = 0.5 * dx - 0.5 * dt * (u - c)
 
         # I2 values at the three interpolation points
-        u_cell_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        u_cell_half = self._safe_velocity(self.h_cell_n_plus_half, self.hu_cell_n_plus_half, dry)
         c_cell_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
-        u_node_n = self.hu_node_n / (self.h_node_n + eps)
+        u_node_n = self._safe_velocity(self.h_node_n, self.hu_node_n, dry)
         c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
 
         f0 = u_cell_half[j - 1] - 2.0 * c_cell_half[j - 1]  # I2 at left cell
@@ -1183,8 +1246,8 @@ class CabaretSolverImproved(CabaretSolverPlus):
         Uses the average of invariants from neighboring cells as starting point,
         which typically gives convergence in 2-3 Newton iterations.
         """
-        eps = 1e-12
-        u_cell = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        dry = self.dry_eps
+        u_cell = self._safe_velocity(self.h_cell_n_plus_half, self.hu_cell_n_plus_half, dry)
         c_cell = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
 
         I1_avg = 0.5 * ((u_cell[j - 1] + 2 * c_cell[j - 1]) + (u_cell[j] + 2 * c_cell[j]))
@@ -1287,9 +1350,10 @@ class CabaretSolverImproved(CabaretSolverPlus):
         4. Recover h, u from corrected invariants (eq 6)
         """
         eps = 1e-12
+        dry = self.dry_eps
 
         # Cell center values at n+1/2
-        u_cell_half = self.hu_cell_n_plus_half / (self.h_cell_n_plus_half + eps)
+        u_cell_half = self._safe_velocity(self.h_cell_n_plus_half, self.hu_cell_n_plus_half, dry)
         c_cell_half = np.sqrt(self.g * np.maximum(0.0, self.h_cell_n_plus_half))
 
         I1_cell_half = u_cell_half + 2.0 * c_cell_half
@@ -1299,7 +1363,7 @@ class CabaretSolverImproved(CabaretSolverPlus):
         lambda2_cell_half = u_cell_half - c_cell_half
 
         # Node values at n
-        u_node_n = self.hu_node_n / (self.h_node_n + eps)
+        u_node_n = self._safe_velocity(self.h_node_n, self.hu_node_n, dry)
         c_node_n = np.sqrt(self.g * np.maximum(0.0, self.h_node_n))
 
         I1_node_n = u_node_n + 2.0 * c_node_n
@@ -1385,8 +1449,12 @@ class CabaretSolverImproved(CabaretSolverPlus):
                 min_I2 = min(I2_node_n[idx2], I2_cell_half[idx2], I2_node_n[idx2 + 1])
                 max_I2 = max(I2_node_n[idx2], I2_cell_half[idx2], I2_node_n[idx2 + 1])
 
-            I1_node_new[j] = np.clip(I1_tilde, min_I1, max_I1)
-            I2_node_new[j] = np.clip(I2_tilde, min_I2, max_I2)
+            if self.monotonize:
+                I1_node_new[j] = np.clip(I1_tilde, min_I1, max_I1)
+                I2_node_new[j] = np.clip(I2_tilde, min_I2, max_I2)
+            else:
+                I1_node_new[j] = I1_tilde
+                I2_node_new[j] = I2_tilde
 
             # --- Step 5: Recover h, u from invariants (eq 6) ---
             self.h_node_n_plus_1_char[j] = ((I1_node_new[j] - I2_node_new[j]) / 4.0) ** 2 / self.g
@@ -1400,6 +1468,10 @@ class CabaretSolverImproved(CabaretSolverPlus):
         self.hu_node_n_plus_1_char[0] = self.hu_node_n[0]
         self.h_node_n_plus_1_char[-1] = self.h_node_n[-1]
         self.hu_node_n_plus_1_char[-1] = self.hu_node_n[-1]
+
+        # Dry cell treatment for nodes
+        self.h_node_n_plus_1_char, self.hu_node_n_plus_1_char = self._apply_dry_cell(
+            self.h_node_n_plus_1_char, self.hu_node_n_plus_1_char)
 
 
 
