@@ -41,14 +41,10 @@ class Simulation:
 
 
         else:
+            self.h, self.hu = self.initial_conditions()
+
             if isinstance(self.solver, CabaretSolver):
-                init_type = config.get('init_type', 'A')
-                if init_type == 'B':
-                    self.h, self.hu = self._init_staggered_grid_B()
-                else:
-                    self.h, self.hu = self._init_staggered_grid_A()
-            else:
-                self.h, self.hu = self.initial_conditions()
+                self.h, self.hu = self.new_grid(self.h, self.hu)
 
 
         self.x = np.linspace(-self.L, self.L, len(self.h), endpoint=True)

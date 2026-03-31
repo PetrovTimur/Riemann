@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from hydra.core.hydra_config import HydraConfig
+from hydra.utils import get_original_cwd
 from training.module import BaseModule
 
 
@@ -64,6 +65,51 @@ class CSVDataset(Dataset):
         return features, targets
 
 
+class CSVRowDataset(Dataset):
+    """CSV dataset that returns (features, targets, raw_row_dict).
+
+    This is used for evaluation where we want to preserve the original
+    row content and append extra columns (e.g., per-row loss).
+    """
+
+    def __init__(self, path: str, feature_cols: int, target_cols: int):
+        self.path = path
+        with open(path, "r") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                raise ValueError(f"CSV has no header: {path}")
+            self.headers: List[str] = list(reader.fieldnames)
+            self.rows = list(reader)
+        if not self.rows:
+            raise ValueError(f"Empty CSV: {path}")
+
+        ncols = len(self.headers)
+        F = feature_cols
+        T = target_cols
+        if F <= 0:
+            raise ValueError("feature_cols must be > 0")
+        if T <= 0:
+            raise ValueError("target_cols must be > 0")
+        if F + T > ncols:
+            raise ValueError(
+                f"feature_cols + target_cols exceeds number of columns: F={F} T={T} ncols={ncols}"
+            )
+
+        self.feature_idx = list(range(0, F))
+        self.target_idx = list(range(F, F + T))
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, idx):
+        row = self.rows[idx]
+        feat_vals = [float(row[self.headers[i]]) for i in self.feature_idx]
+        targ_vals = [float(row[self.headers[i]]) for i in self.target_idx]
+        features = torch.tensor(feat_vals, dtype=torch.float32)
+        targets = torch.tensor(targ_vals, dtype=torch.float32)
+        return features, targets, row
+
+
 class Trainer:
     def __init__(
         self,
@@ -80,6 +126,11 @@ class Trainer:
         validation_frequency_epochs: int,
         ckpt_frequency_epochs: int,
         checkpoint_path: Optional[str] = None,
+        # eval-only options (safe to ignore during training)
+        eval_output_table: Optional[str] = None,
+        eval_loss_col: str = "loss",
+        eval_add_preds: bool = True,
+        eval_pred_prefix: str = "pred_",
     ):
         self.module = module
         self.num_pseudo_epochs = num_pseudo_epochs
@@ -92,6 +143,10 @@ class Trainer:
         self.validation_frequency_epochs = validation_frequency_epochs
         self.config = config
         self.checkpoint_path = checkpoint_path
+        self.eval_output_table = eval_output_table
+        self.eval_loss_col = eval_loss_col
+        self.eval_add_preds = eval_add_preds
+        self.eval_pred_prefix = eval_pred_prefix
         self.ckpt_frequency_epochs = ckpt_frequency_epochs
 
         self.device = (
@@ -139,11 +194,22 @@ class Trainer:
         print(f"[Trainer] Saved checkpoint: {path}")
 
     def _load_checkpoint(self, path: str):
-        abs_path = (
-            path if os.path.isabs(path) else os.path.join(self.checkpoint_dir, path)
-        )
-        if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"Checkpoint not found: {abs_path}")
+        # Hydra changes the process working directory to the run output directory.
+        # For UX, interpret relative checkpoint paths as relative to the *original*
+        # working directory (typically project root). Still allow absolute paths,
+        # and also allow paths relative to the Hydra output dir.
+        candidates = []
+        if os.path.isabs(path):
+            candidates.append(path)
+        else:
+            candidates.append(os.path.join(get_original_cwd(), path))
+            candidates.append(os.path.join(self.checkpoint_dir, path))
+
+        abs_path = next((p for p in candidates if os.path.exists(p)), None)
+        if abs_path is None:
+            raise FileNotFoundError(
+                "Checkpoint not found. Tried:\n" + "\n".join(candidates)
+            )
         ckpt_obj = torch.load(abs_path, map_location=self.device)
         if not isinstance(ckpt_obj, dict) or "state_dict" not in ckpt_obj:
             raise ValueError(
@@ -229,6 +295,114 @@ class Trainer:
         image_dict = self.module.visualize()
         for key, image in image_dict.items():
             self.writer.add_image(key, image, epoch, dataformats="HWC")
+
+    @torch.no_grad()
+    def eval_to_table(
+        self,
+        output_path: str,
+        loss_col: Optional[str] = None,
+        add_preds: bool = True,
+        pred_prefix: str = "pred_",
+    ) -> str:
+        """Evaluate on val_table and write a CSV with an extra per-row loss column.
+
+        - Uses the model checkpoint already loaded (via checkpoint_path in config).
+        - Preserves all original CSV columns.
+        - Appends a new column (default: "loss") with per-sample loss.
+
+        Args:
+            output_path: Destination path for the produced CSV. If relative,
+              it is resolved under the Hydra output directory.
+            loss_col: Name of the appended loss column.
+
+        Returns:
+            Absolute path to the written CSV.
+        """
+
+        if loss_col is None:
+            loss_col = self.eval_loss_col
+
+        out_path = (
+            output_path
+            if os.path.isabs(output_path)
+            else os.path.join(self.checkpoint_dir, output_path)
+        )
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+        ds = CSVRowDataset(self.val_table, self.feature_cols, self.target_cols)
+
+        def _collate_with_rows(batch):
+            # batch is List[Tuple[features, targets, row_dict]]
+            features = torch.stack([b[0] for b in batch], dim=0)
+            targets = torch.stack([b[1] for b in batch], dim=0)
+            rows = [b[2] for b in batch]
+            return features, targets, rows
+
+        loader = DataLoader(
+            ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=_collate_with_rows,
+        )
+
+        self.module.eval()
+        # keep solver/model in sync for any downstream closed-loop metrics
+        self.module.solver.model.load_state_dict(self.module.model.state_dict())
+
+        fieldnames = list(ds.headers)
+        if loss_col not in fieldnames:
+            fieldnames.append(loss_col)
+
+        pred_cols: List[str] = []
+        if add_preds:
+            pred_cols = [f"{pred_prefix}{i}" for i in range(self.target_cols)]
+            for c in pred_cols:
+                if c not in fieldnames:
+                    fieldnames.append(c)
+
+        total = 0
+        sum_loss = 0.0
+
+        with open(out_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for features, targets, rows in loader:
+                features = features.to(self.device)
+                targets = targets.to(self.device)
+                data = {"feats": features, "targets": targets}
+
+                pred = self.module(data)
+                # loss() returns scalar aggregated over batch; here we need per-sample
+                pred_invs = pred["preds"]  # [B, T]
+                mse = torch.nn.functional.mse_loss(
+                    pred_invs, targets, reduction="none"
+                )  # [B, T]
+                per_sample = mse.mean(dim=1)  # [B]
+
+                pred_cpu = pred_invs.detach().cpu().tolist() if add_preds else None
+
+                for i, (row_dict, l) in enumerate(
+                    zip(rows, per_sample.detach().cpu().tolist())
+                ):
+                    # row_dict should already be a mapping (Dict[str, str])
+                    out_row = row_dict.copy() if hasattr(row_dict, "copy") else dict(row_dict)
+                    out_row[loss_col] = float(l)
+
+                    if add_preds and pred_cpu is not None:
+                        for j, c in enumerate(pred_cols):
+                            out_row[c] = float(pred_cpu[i][j])
+
+                    writer.writerow(out_row)
+                    total += 1
+                    sum_loss += float(l)
+
+        avg = sum_loss / max(total, 1)
+        self.writer.add_scalar("eval_row_loss_mean", avg, 0)
+        print(f"[Trainer] Wrote eval table with per-row loss to: {out_path}")
+        print(f"[Trainer] Eval rows={total} mean_{loss_col}={avg:.6f}")
+
+        return out_path
 
     def eval(self) -> dict:
         """Evaluate using the same logic as val_epoch without duplicating code."""
