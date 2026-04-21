@@ -14,6 +14,10 @@ class MLP(nn.Module):
         super(MLP, self).__init__()
         self.weights = weights
 
+        self.record_weights = False
+        self.weight_history = []
+        self.logit_history = []
+
         self.in_proj = nn.Linear(input_features, dim)
 
         self.layers = nn.ModuleList([nn.Linear(dim, dim) for _ in range(n_layers)])
@@ -24,8 +28,8 @@ class MLP(nn.Module):
             # self.alpha = nn.Parameter(torch.rand(1, 2, 1))
             # torch.nn.init.kaiming_normal_(self.alpha)
 
-            self.first_idx = torch.tensor([0, 1, 2, 6, 7, 10, 11], device="cuda")
-            self.second_idx = torch.tensor([3, 4, 5, 8, 9, 12, 13], device="cuda")
+            self.register_buffer('first_idx', torch.tensor([0, 1, 2, 6, 7, 10, 11]))
+            self.register_buffer('second_idx', torch.tensor([3, 4, 5, 8, 9, 12, 13]))
         else:
             self.out_proj = nn.Linear(dim, 2)
 
@@ -40,8 +44,12 @@ class MLP(nn.Module):
         feats2 = feats.index_select(dim=1, index=self.second_idx)  # [B, F2]
         feats_stacked = torch.stack([feats1, feats2], dim=1)  # [B, 2, F_group]
 
-        w = outputs.view(B, 2, F // 2)  # [B, 2, F/2]
-        w = torch.softmax(w, dim=-1)  # [B, 2, F/2]
+        logits = outputs.view(B, 2, F // 2)  # [B, 2, F/2]
+        w = torch.softmax(logits, dim=-1)  # [B, 2, F/2]
+
+        if self.record_weights:
+            self.logit_history.append(logits.detach().cpu())
+            self.weight_history.append(w.detach().cpu())
         # w = w / torch.sum(w, dim=-1, keepdim=True)
 
         # alpha = 1.5  # can be >1 to allow values >1 and <0

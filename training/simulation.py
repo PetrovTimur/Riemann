@@ -1,7 +1,11 @@
 import numpy as np
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.widgets import Slider
+from omegaconf import OmegaConf
+
 from training.solvers import (
     CabaretSolver,
     GodunovSolver,
@@ -14,6 +18,9 @@ from training.solvers import (
     BaseSolver
 )
 from training.models import load_nn
+
+import torch
+from hydra.utils import instantiate
 
 
 class Simulation:
@@ -209,14 +216,16 @@ class Simulation:
 
     def run(self):
         t = 0.0
-        CFL = 0.2
+        CFL = 0.1
         g = 9.81
         h = self.h.copy()
         hu = self.hu.copy()
         self.h_rollout = [h.copy()]
         self.hu_rollout = [hu.copy()]
+        # print(hu)
         k = 0
-        while self.t < self.t_end:
+        while self.t < self.t_end and k < 1000:
+            # print(k)
             # print(self.t)
             # u = np.where(h > 0, hu / h, 0)
             # c = np.sqrt(g * h)
@@ -241,7 +250,10 @@ class Simulation:
                 sol = r_solver.solve(self.x, self.t + dt, self.h_l, self.u_l, self.h_r, self.u_r)['vals']
                 h, hu = self.solver.step(h.copy(), hu.copy(), self.dx, dt, sol[0], sol[1])
             else:
-                h, hu = self.solver.step(h.copy(), hu.copy(), self.dx, dt)
+                try:
+                    h, hu = self.solver.step(h.copy(), hu.copy(), self.dx, dt)
+                except AssertionError:
+                    break
             self.t += dt
             self.h_rollout.append(h.copy())
             self.hu_rollout.append(hu.copy())
@@ -313,6 +325,50 @@ class Simulation:
 
         slider.on_changed(update)
         plt.show()
+
+    def save_animation(self, path, fps=30, stride=1, dpi=100):
+        """Render the rollout as a GIF (or mp4 if path ends with .mp4 and ffmpeg is available)."""
+        rollout_len = len(self.h_rollout)
+        frames = list(range(0, rollout_len, stride))
+
+        x = np.linspace(-self.L, self.L, len(self.h), endpoint=True)
+        fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+
+        h_all = np.array(self.h_rollout)
+        hu_all = np.array(self.hu_rollout)
+        h_min, h_max = np.min(h_all), np.max(h_all)
+        hu_min, hu_max = np.min(hu_all), np.max(hu_all)
+        h_pad = 0.05 * (h_max - h_min) if h_max > h_min else 0.1
+        hu_pad = 0.05 * (hu_max - hu_min) if hu_max > hu_min else 0.1
+
+        h_line, = axes[0].plot(x, self.h_rollout[0], label='h', color='b', marker='o')
+        axes[0].set_title('Water Height h')
+        axes[0].set_ylim(h_min - h_pad, h_max + h_pad)
+        axes[0].grid(True)
+
+        hu_line, = axes[1].plot(x, self.hu_rollout[0], label='hu', color='r', marker='o')
+        axes[1].set_title('Momentum hu')
+        axes[1].set_ylim(hu_min - hu_pad, hu_max + hu_pad)
+        axes[1].grid(True)
+
+        title = fig.suptitle(f'step 0 / {rollout_len - 1}')
+        plt.tight_layout()
+
+        def update(idx):
+            h_line.set_ydata(self.h_rollout[idx])
+            hu_line.set_ydata(self.hu_rollout[idx])
+            title.set_text(f'step {idx} / {rollout_len - 1}')
+            return h_line, hu_line, title
+
+        anim = FuncAnimation(fig, update, frames=frames, blit=False)
+
+        if path.endswith('.mp4'):
+            anim.save(path, fps=fps, dpi=dpi)
+        else:
+            anim.save(path, writer=PillowWriter(fps=fps), dpi=dpi)
+
+        plt.close(fig)
+        print(f'saved animation to {path}')
 
 def plot_comparison(sims, labels=None, plot_solution=True, riemann_kwargs=None, plot_u=False):
     if not isinstance(sims, (list, tuple)):
@@ -424,7 +480,7 @@ if __name__ == '__main__':
     # model2 = load_nn(path='checkpoints/model_pairs_2.pt', input_features=14, n_feats=40)
 
     config = {
-        'L': 0.5,
+        'L': 1.0,
         'nx': 100,
 
         # 'h_l': 1.0,
@@ -459,10 +515,10 @@ if __name__ == '__main__':
         # 'u_l': 2.5,
         # 'u_r': 0,
 
-        'h_l': 100.0,
-        'h_r': 1.0,
-        'u_l': 0.0,
-        'u_r': 0.0,
+        # 'h_l': 100.0,
+        # 'h_r': 1.0,
+        # 'u_l': 0.0,
+        # 'u_r': 0.0,
 
 
         # 'h_l': 0.1,
@@ -475,7 +531,25 @@ if __name__ == '__main__':
         # 'u_l': 0.49,
         # 'u_r': 11.38,
 
-        't_end': 0.012,
+        # 'h_l': 0.10531860589981079,
+        # 'h_r': 1.1079761981964111,
+        # 'u_l': -9.377503395080566 / 0.10531860589981079,
+        # 'u_r': -8.32735824584961 / 1.1079761981964111,
+
+        't_end': 5e-3,
+        't_start': 0,
+    }
+
+    config = {
+        "L": 1,
+        "nx": 100,
+
+        "h_l": 1.5427643060684204,
+        "h_r": 0.12493903934955597,
+        "u_l": 6.987070083618164 / 1.5427643060684204,
+        "u_r": -4.349460124969482 / 0.12493903934955597,
+
+        't_end': 5e-3,
         't_start': 0,
     }
 
@@ -491,35 +565,48 @@ if __name__ == '__main__':
 
         # print(h, u)
 
-    config['solver'] = CabaretSolverPlus()
-    sim1 = Simulation(config)
-    sim1.run()
+    # config['solver'] = CabaretSolverPlus()
+    # sim1 = Simulation(config)
+    # sim1.run()
     # sim.plot()
-    sim1.plot_animation()
+    # sim1.plot_animation()
+
+    # ----------------------------
+    # ckpt_path = "/home/timur/Coding/Riemann/outputs/2026-04-15/10-37-00/checkpoints/ckpt_epoch_0069.pt"
+    ckpt_path ="/home/timurpetrov/code/riemann/outputs/2026-04-15/09-29-52/checkpoints/ckpt_epoch_0009.pt"
+    device = "cpu"
+    ckpt = torch.load(ckpt_path, map_location=device)
+
+    config_module = OmegaConf.create(ckpt['config'])
+    module = instantiate(config_module.module)
+
+    module.load_state_dict(ckpt['state_dict'], strict=False)
+    module.to(device)
+    module.eval()
+
+    module.solver.model.load_state_dict(module.model.state_dict())
+    module.solver.model.cpu()
+    config["solver"] = module.solver
+    # --------------------------------
+    sim1 = Simulation(config)
+
+    sim1.run()
+    sim1.save_animation('sim_cabaret_nn.gif')
 
     config['solver'] = GodunovSolver(solver_func='newton')
     sim2 = Simulation(config)
     sim2.run()
-    sim2.plot_animation()
+    sim2.save_animation('sim_godunov.gif')
 
 
     config['solver'] = CabaretSolverImproved()
     # config['t_end'] = 0.2
-    config["init_type"] = "B"
+    # config["init_type"] = "B"
     sim3 = Simulation(config)
     sim3.run()
-    sim3.plot_animation()
-    # # sim3.plot()
+    sim3.save_animation('sim_cabaret_improved.gif')
 
-    # print(torch.load('checkpoints/model_pairs_5.pt'))
-
-    # model = load_nn(path='checkpoints/model_pairs_5.pt', input_features=14, n_feats=40)
-    # config['solver'] = CabaretSolverNN(model, softmax=True)
-    # sim4 = Simulation(config)
-    # sim4.run()
-    # sim4.plot_animation()
-
-    # plot_comparison([sim1, sim2], labels=['Cabaret', 'Godunov'], plot_solution=True)
-    # plot_comparison([sim1, sim2, sim3, sim4], labels=['CabaretNN', 'Godunov', 'Cabaret+', 'CabaretClassic'], plot_solution=True, plot_u=True)
     fig = plot_comparison([sim1, sim2, sim3], labels=['Cabaret', 'Godunov', 'CabaretImproved'], plot_solution=True, plot_u=True)
-    plt.show()
+    fig.savefig('comparison.png', dpi=150)
+    plt.close(fig)
+    print('saved comparison.png')

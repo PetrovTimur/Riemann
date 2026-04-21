@@ -63,6 +63,7 @@ class BaseModule(nn.Module):
             config["solver"] = self.solver
             sim = Simulation(config)
             sim.run()
+            # sim.plot_animation()
 
             try:
                 fig = plot_comparison([sim], plot_solution=True)

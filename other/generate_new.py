@@ -28,7 +28,7 @@ def load_and_preprocess_data(file_path: str, exclude_category: int = 8) -> pd.Da
         DataFrame with original data plus computed velocities and wave speeds
     """
     df = pd.read_csv(file_path)
-    df = df[df['category'] != exclude_category]
+    # df = df[df['category'] != exclude_category]
 
     # Compute velocities and wave speeds
     df['uL'] = df['huL'] / df['hL']
@@ -97,13 +97,17 @@ def prepare_datasets(df: pd.DataFrame, test_size: float = 0.2, random_state: int
     y = df[['h_star', 'u_star']]
 
     # Stratified split if category column exists
-    stratify = df['category'] if 'category' in df.columns else None
+    category = df['category'] if 'category' in df.columns else None
+    stratify = category
     train_X, val_X, train_y, val_y = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=stratify
     )
 
     print(f"Training input shape: {train_X.shape}")
     print(f"Validation input shape: {val_X.shape}")
+
+    # Preserve category for training rows (aligned with train_X by index)
+    train_categories = category.loc[train_X.index].values if category is not None else None
 
     # Convert to PyTorch tensors
     train_X_tensor = torch.tensor(train_X.values, dtype=torch.float32)
@@ -118,7 +122,7 @@ def prepare_datasets(df: pd.DataFrame, test_size: float = 0.2, random_state: int
     print(f"Training dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
 
-    return train_dataset, val_dataset, train_X_tensor
+    return train_dataset, val_dataset, train_X_tensor, train_categories
 
 
 def create_output_dataframe() -> pd.DataFrame:
@@ -148,7 +152,7 @@ def create_output_dataframe() -> pd.DataFrame:
 
 
 def run_simulation(hL: float, huL: float, hR: float, huR: float,
-                   L: float = 1.0, nx: int = 20, t_end: float = 5e-3):
+                   L: float = 1.0, nx: int = 100, t_end: float = 5e-3):
     """
     Run a CABARET simulation for given Riemann initial conditions.
 
@@ -196,7 +200,7 @@ def run_simulation(hL: float, huL: float, hR: float, huR: float,
     return sim, (h, u)
 
 
-def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, use_local_riemann: bool = False):
+def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, target_type: str = 'local_riemann'):
     """
     Extract Riemann invariants from solver state at various spatial/temporal positions
     and append to output DataFrame.
@@ -213,8 +217,7 @@ def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, use_loca
         solver: CABARET solver object with solution data
         target: Tuple of (h_true, u_true) from exact solver
         output_df: DataFrame to append extracted data to
-        use_local_riemann: If True, use local Riemann solution from n+1/2 cell values
-                          instead of exact solution for true targets
+        target_type: Method to select true target values (one of 'local_riemann', 'exact', 'scheme')
 
     Returns:
         Number of interesting points extracted
@@ -252,9 +255,10 @@ def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, use_loca
 
     # Create interesting mask: supersonic flow (|u| > c)
     interesting_mask = np.abs(u_cell_n_plus_half) > c_cell_n_plus_half
+    interesting_mask = np.full_like(interesting_mask, True)
 
     # Compute true solution Riemann invariants
-    if use_local_riemann:
+    if target_type == 'local_riemann':
         # Use local Riemann solution from cell n+1/2 values
         # Only compute for interesting cells
         I1_cell_true = np.zeros(cell_count)
@@ -282,7 +286,23 @@ def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, use_loca
             c_star = np.sqrt(g * np.maximum(0.0, h_star))
             I1_cell_true[cell_idx] = u_star + 2 * c_star
             I2_cell_true[cell_idx] = u_star - 2 * c_star
-    else:
+    elif target_type == 'scheme':
+        I1_cell_true = np.zeros(cell_count)
+        I2_cell_true = np.zeros(cell_count)
+
+        # Get nodes state at n+1 characteristic phase
+        h_node_n_plus_1 = solver.h_node_n_plus_1_char
+        hu_node_n_plus_1 = solver.hu_node_n_plus_1_char
+        u_node_n_plus_1 = hu_node_n_plus_1 / (h_node_n_plus_1 + 1e-12)
+        c_node_n_plus_1 = np.sqrt(g * np.maximum(0.0, h_node_n_plus_1))
+
+        for cell_idx in range(1, cell_count - 1):
+            # For cell i, the relevant newly updated node true value is at node i+1 (right node)
+            n_idx = cell_idx + 1
+            if n_idx < len(h_node_n_plus_1):
+                I1_cell_true[cell_idx] = u_node_n_plus_1[n_idx] + 2 * c_node_n_plus_1[n_idx]
+                I2_cell_true[cell_idx] = u_node_n_plus_1[n_idx] - 2 * c_node_n_plus_1[n_idx]
+    else:  # 'exact'
         # Use exact solution from global Riemann solver
         h, u = target
         h_cell_true = h[1::2]  # Extract cell values (odd indices)
@@ -330,37 +350,42 @@ def extract_riemann_invariants(solver, target, output_df: pd.DataFrame, use_loca
 
 
 
-def generate_training_data(input_tensor: torch.Tensor, output_df: pd.DataFrame, use_local_riemann: bool = False):
+def generate_training_data(input_tensor: torch.Tensor, output_df: pd.DataFrame,
+                           target_type: str = 'local_riemann', categories=None):
     """
     Generate training data by running simulations for all input samples.
 
     Args:
         input_tensor: Tensor of shape (N, 4) with [hL, huL, hR, huR] for each sample
         output_df: DataFrame to store extracted Riemann invariants
-        use_local_riemann: If True, use local Riemann solution from n+1/2 cell values
+        target_type: Method to select true target values (one of 'local_riemann', 'exact', 'scheme')
+        categories: Optional array of category labels aligned with input_tensor rows
     """
-    pbar = tqdm(input_tensor, desc="Generating training data", unit="sample")
-    for episode in pbar:
+    import json
+    pbar = tqdm(enumerate(input_tensor), desc="Generating training data", unit="sample", total=len(input_tensor))
+    for i, episode in pbar:
         hL, huL, hR, huR = map(lambda x: x.item(), episode)
 
         sim, target = run_simulation(hL, huL, hR, huR)
 
         # Track how many rows existed before extraction so we can attach meta
         start_len = len(output_df)
-        extract_riemann_invariants(sim.solver, target, output_df, use_local_riemann=use_local_riemann)
+        extract_riemann_invariants(sim.solver, target, output_df, target_type=target_type)
 
         # Attach meta to every row that was added for this episode.
         # Use .at/.loc (not chained indexing) so the assignment is guaranteed to persist.
         if len(output_df) > start_len:
-
+            # Appending rows with None can flip the column to float64; keep it as object.
+            if output_df['meta'].dtype != object:
+                output_df['meta'] = output_df['meta'].astype(object)
             meta = {
                 'hL': float(hL),
                 'huL': float(huL),
                 'hR': float(hR),
                 'huR': float(huR),
             }
-            # Storing dicts in a CSV column is awkward; a JSON string round-trips cleanly.
-            import json
+            if categories is not None:
+                meta['category'] = int(categories[i])
             meta_json = json.dumps(meta, separators=(",", ":"))
 
             for idx in range(start_len, len(output_df)):
@@ -373,36 +398,31 @@ def generate_training_data(input_tensor: torch.Tensor, output_df: pd.DataFrame, 
 def split_and_save_dataset(df: pd.DataFrame, output_dir: str,
                            test_size: float = 0.2, random_state: int = 42):
     """
-    Split dataset into train/validation and save to CSV files.
-
-    Args:
-        df: DataFrame to split
-        output_dir: Directory to save train.csv and val.csv
-        test_size: Fraction of data for validation
-        random_state: Random seed for reproducibility
+    Split dataset into train/validation and save all.csv, train.csv, val.csv,
+    and train_no_meta.csv to output_dir.
     """
     os.makedirs(output_dir, exist_ok=True)
-
-    train_path = os.path.join(output_dir, "train.csv")
-    val_path = os.path.join(output_dir, "val.csv")
 
     # Check if stratify column exists
     stratify_col = df['category'] if 'category' in df.columns else None
 
-    # Split dataset
     train_df, val_df = train_test_split(
         df, test_size=test_size, random_state=random_state, stratify=stratify_col
     )
 
-    # Reset indices and save
     train_df = train_df.reset_index(drop=True)
     val_df = val_df.reset_index(drop=True)
 
-    train_df.to_csv(train_path, index=False)
-    val_df.to_csv(val_path, index=False)
-
-    print(f"Saved training data: {len(train_df)} samples to {train_path}")
-    print(f"Saved validation data: {len(val_df)} samples to {val_path}")
+    files = {
+        "all.csv": df,
+        "train.csv": train_df,
+        "val.csv": val_df,
+        "train_no_meta.csv": train_df.drop(columns=["meta"], errors="ignore"),
+    }
+    for name, data in files.items():
+        path = os.path.join(output_dir, name)
+        data.to_csv(path, index=False)
+        print(f"Saved {len(data)} rows to {path}")
 
     return train_df, val_df
 
@@ -412,10 +432,10 @@ def main():
     Main execution function to generate Riemann invariant training data.
     """
     # Configuration
-    input_file = 'datasets/old/riemann_training_data_balanced2.csv'
-    output_file = 'datasets/last_improved_dataset/all.csv'
-    output_dir = 'datasets/last_improved_dataset'
-    use_local_riemann = False  # Set to True to use local Riemann solution from n+1/2 cell values
+    input_file = 'datasets/raw/generated_samples.csv'
+    # input_file = 'datasets/old/riemann_training_data_balanced2.csv'
+    output_dir = 'datasets/20_04-100points-solver_target-wo_filter_all'
+    target_type = 'scheme'  # Options: 'local_riemann', 'exact', 'scheme'
 
     # Load and preprocess data
     print("Loading data...")
@@ -424,26 +444,21 @@ def main():
     df = df[:1000]  # Take only first 100 samples for testing
 
     # Visualize distribution (optional)
-    plot_condition_heatmap(df, show=False)
+    plot_condition_heatmap(df, show=True)
 
     # Prepare datasets
     print("Preparing datasets...")
-    train_dataset, val_dataset, train_X_tensor = prepare_datasets(df)
+    train_dataset, val_dataset, train_X_tensor, train_categories = prepare_datasets(df)
 
     # Create output dataframe for Riemann invariants
     new_df = create_output_dataframe()
 
     # Generate training data from simulations
-    generate_training_data(train_X_tensor, new_df, use_local_riemann=use_local_riemann)
+    generate_training_data(train_X_tensor, new_df, target_type=target_type, categories=train_categories)
 
     print(f"\nGenerated {len(new_df)} samples")
 
-    # Save complete dataset
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    new_df.to_csv(output_file, index=False)
-    print(f"Saved complete dataset to {output_file}")
-
-    # Split and save train/val
+    # Split and save all outputs to output_dir
     print("\nSplitting into train/validation sets...")
     train_df, val_df = split_and_save_dataset(new_df, output_dir)
 

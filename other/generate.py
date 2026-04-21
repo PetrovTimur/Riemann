@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from training.solvers import riemann_solver_newton
 # from test2 import generate_log_uniform_sample
 
 def generate_training_data(riemann_solver_newton, num_samples=1000,
@@ -60,7 +61,7 @@ def generate_balanced_training_data(riemann_solver_newton, num_samples_per_categ
     }
 
     # Storage for samples, one list per category
-    samples = {cat: [] for cat in range(8)}
+    samples = {cat: [] for cat in range(9)}
 
     # Function to compute condition index
     def get_cond(u, c):
@@ -89,8 +90,8 @@ def generate_balanced_training_data(riemann_solver_newton, num_samples_per_categ
         right_cond = get_cond(uR, cR)
 
         # Skip sample if both conditions are the middle case
-        if left_cond == 1 and right_cond == 1:
-            continue
+        # if left_cond == 1 and right_cond == 1:
+        #     continue
 
         # Map conditions to a category, if mapping exists
         key = (left_cond, right_cond)
@@ -118,3 +119,28 @@ def generate_balanced_training_data(riemann_solver_newton, num_samples_per_categ
 
     df = pd.DataFrame(data_list, columns=['hL', 'huL', 'hR', 'huR', 'h_star', 'u_star', 'iter', 'category'])
     return df
+
+if __name__ == "__main__":
+    import os
+    import sys
+    
+    # # Add the root directory to sys.path to allow importing from 'training'
+    # project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # if project_root not in sys.path:
+    #     sys.path.append(project_root)
+    #
+    # from training.solvers import riemann_solver_newton
+
+    print("Generating balanced training data...")
+    df = generate_balanced_training_data(
+        riemann_solver_newton, 
+        num_samples_per_category=100
+    )
+    
+    # Define an output path in the datasets folder
+    output_dir = os.path.join("datasets", "raw")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "generated_samples.csv")
+    
+    df.to_csv(output_path, index=False)
+    print(f"Successfully generated {len(df)} samples and saved to: {output_path}")

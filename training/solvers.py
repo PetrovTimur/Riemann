@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from scipy.optimize import fsolve, newton
 
+import pickle
+
 
 def riemann_solver_newton(hL, huL, hR, huR, g = 9.8066, tol=1e-6, max_iter=1000):
 
@@ -374,8 +376,9 @@ def riemann_solver_approx(hL, huL, hR, huR, g=9.81):
 
 def riemann_solver_nn(hL, huL, hR, huR, model, g=9.8066):
     # inputs = torch.tensor([hL, huL, hR, huR, np.sqrt(g * hL), np.sqrt(g * hR)], dtype=torch.float32)
-    inputs = torch.tensor([hL, huL, hR, huR], dtype=torch.float32)
-    h_star, u_star = model(inputs.to('cuda')).cpu().detach().numpy()
+    device = next(model.parameters()).device
+    inputs = torch.tensor([hL, huL, hR, huR], dtype=torch.float32, device=device)
+    h_star, u_star = model(inputs).cpu().detach().numpy()
 
     F_h = h_star * u_star
     F_hu = h_star * u_star ** 2 + 0.5 * g * h_star ** 2
@@ -385,7 +388,8 @@ def riemann_solver_nn(hL, huL, hR, huR, model, g=9.8066):
     return flux_i
 
 def nn_solver(data, model):
-    inputs = torch.tensor(data, dtype=torch.float32).cuda()
+    device = next(model.parameters()).device
+    inputs = torch.tensor(data, dtype=torch.float32, device=device)
     I1, I2 = model.generate(inputs.unsqueeze(0)).squeeze(0).cpu().detach().numpy()
 
     return I1, I2
@@ -448,8 +452,10 @@ class CabaretSolver(BaseSolver):
         self.dx, self.dt = None, None
         self.h, self.hu, self.pos_char, self.neg_char = None, None, None, None
 
-    def _correct_invariants(self, pos_char, neg_char, pos_char_new, neg_char_new):
+    def _correct_invariants(self, pos_char, neg_char, pos_char_new, neg_char_new, skip_mask=None):
         for i in range(2, neg_char_new.shape[0] - 1, 2):
+            if skip_mask is not None and skip_mask[i]:
+                continue
             # lambda_pos = u[i + 1] + (self.g * h[i + 1]) ** 0.5
             # lambda_neg = u[i + 1] - (self.g * h[i + 1]) ** 0.5
 
@@ -510,10 +516,11 @@ class CabaretSolver(BaseSolver):
 
     def _step3(self):
         self.h[1::2] -= self.dt / (2 * self.dx) * (self.hu[2::2] - self.hu[:-1:2])
+        assert np.isfinite(self.h).all(), f"{self.h}"
         self.hu[1::2] -= self.dt / (2 * self.dx) * ((self.h[2::2] * (self.u[2::2]) ** 2 + 0.5 * self.g * self.h[2::2] ** 2) - (self.h[:-1:2] * (self.u[:-1:2]) ** 2 + 0.5 * self.g * self.h[:-1:2] ** 2))
 
     def step(self, h, hu, dx, dt):
-        self.h = h
+        self.h = np.maximum(h, 1e-3)
         self.hu = hu
         self.dx = dx
         self.dt = dt
@@ -521,15 +528,18 @@ class CabaretSolver(BaseSolver):
         # print(self.h[18:23])
         # print(self.hu[18:23])
         self._step1()
+        self.h = np.maximum(self.h, 1e-3)
         # print(dt, dx, self.h[1::2])
         # print('after step 1')
         # print(self.h[18:23])
         # print(self.hu[18:23])
         self._step2()
+        self.h = np.maximum(self.h, 1e-3)
         # print(dt, dx, self.h[::2])
         # print('after step 2')
         # print(self.h[18:23])
         # print(self.hu[18:23])
+        self.h = np.maximum(self.h, 1e-3)
         self._step3()
         # print('after step 3')
         # print(self.h[18:23])
@@ -930,12 +940,17 @@ class CabaretSolverNN(CabaretSolver):
 
         self.model = model
         self.softmax = softmax
+        self.f_out = open("simulation_outs.txt", "w")
 
     def _step2(self):
         self.u = self.hu / self.h
 
+        # assert (self.h > 0).all(), f"{self.h}"
+
         neg_char_new = self.u - 2 * np.sqrt(self.g * self.h)
         pos_char_new = self.u + 2 * np.sqrt(self.g * self.h)
+
+        self.nn_mask = np.zeros(pos_char_new.shape[0], dtype=bool)
 
         for i in range(1, self.h.shape[0] - 3, 2):
             hL = self.h[i]
@@ -949,10 +964,16 @@ class CabaretSolverNN(CabaretSolver):
             cL = np.sqrt(self.g * hL)
             cR = np.sqrt(self.g * hR)
 
+            # if self.hu[i + 1] == 0:
+            #     print("ALARM 0")
+            #     print(hL, hR, huL, huR)
+            #     print(uL, uR)
+            #     print(cL, cR)
+
             if (-cL <= uL <= cL) and (-cR <= uR <= cR):
                 # use classic
-                neg_char_new[i] = 2 * neg_char_new[i + 1] - self.neg_char[i + 2]
-                pos_char_new[i] = 2 * pos_char_new[i - 1] - self.pos_char[i - 2]
+                neg_char_new[i + 1] = 2 * neg_char_new[i + 2] - self.neg_char[i + 3]
+                pos_char_new[i + 1] = 2 * pos_char_new[i] - self.pos_char[i - 1]
 
             else:
                 # print('using nn', i)
@@ -967,6 +988,14 @@ class CabaretSolverNN(CabaretSolver):
                 I1_cell_n_plus_half = pos_char_new[1::2]
                 I2_cell_n_plus_half = neg_char_new[1::2]
 
+                # print(self.h[i], self.h[i + 1], self.h[i + 2])
+                # if self.hu[i + 1] == 0:
+                #     print("ALARM")
+                #     print(self.h[i : i+3])
+                #     print(self.hu[i : i+3])
+
+                # print(I1_cell_n_plus_half - I2_cell_n_plus_half)
+
                 j = j // 2
 
                 data = [I1_node_n[j - 1], I1_node_n[j], I1_node_n[j + 1],
@@ -978,6 +1007,8 @@ class CabaretSolverNN(CabaretSolver):
                 if ((uR < -cR) and (uL < cL)) or ((uL < -cL) and (uR < cR)):
                     u_cell_n_plus_half = (I1_cell_n_plus_half + I2_cell_n_plus_half) / 2
                     h_cell_n_plus_half = ((I1_cell_n_plus_half - I2_cell_n_plus_half) / 4) ** 2 / self.g
+
+                    h_cell_n_plus_half = np.maximum(h_cell_n_plus_half, 1e-6)
 
                     u_node_n = (I1_node_n + I2_node_n) / 2
                     h_node_n = ((I1_node_n - I2_node_n) / 4) ** 2 / self.g
@@ -1002,6 +1033,8 @@ class CabaretSolverNN(CabaretSolver):
                     I1_node_n_flipped = u_node_n + 2 * np.sqrt(self.g * h_node_n)
                     I2_node_n_flipped = u_node_n - 2 * np.sqrt(self.g * h_node_n)
 
+                    # assert (h_cell_n_plus_half > 0).all(), f"h_cell_n_plus_half = {h_cell_n_plus_half}"
+
                     I1_cell_n_plus_half_flipped = u_cell_n_plus_half + 2 * np.sqrt(self.g * h_cell_n_plus_half)
                     I2_cell_n_plus_half_flipped = u_cell_n_plus_half - 2 * np.sqrt(self.g * h_cell_n_plus_half)
 
@@ -1015,6 +1048,8 @@ class CabaretSolverNN(CabaretSolver):
                         I1_cell_n_flipped[j - 1], I1_cell_n_flipped[j], I2_cell_n_flipped[j - 1], I2_cell_n_flipped[j]]
 
                 I1, I2 = nn_solver(data, self.model)
+                # assert abs(I1) < 100, f"{data}"
+                print(f"{I1}, {I2}", file=self.f_out)
 
                 if ((uR < -cR) and (uL < cL)) or ((uL < -cL) and (uR < cR)):
                     u_new = (I1 + I2) / 2
@@ -1033,10 +1068,11 @@ class CabaretSolverNN(CabaretSolver):
 
                 pos_char_new[j] = I1
                 neg_char_new[j] = I2
+                self.nn_mask[j] = True
 
             # print(i, self.h[i], self.hu[i], self.h[i + 2], self.hu[i + 2], self.h[i + 1], self.hu[i + 1])
 
-        self._correct_invariants(self.pos_char, self.neg_char, pos_char_new, neg_char_new)
+        self._correct_invariants(self.pos_char, self.neg_char, pos_char_new, neg_char_new, skip_mask=self.nn_mask)
 
         for i in range(2, len(self.u) - 1, 2):
             self.u[i] = (neg_char_new[i] + pos_char_new[i]) / 2
